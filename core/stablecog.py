@@ -6,6 +6,7 @@ import random
 import requests
 import time
 import traceback
+import json
 from asyncio import AbstractEventLoop
 from PIL import Image, PngImagePlugin
 from discord import option
@@ -392,6 +393,9 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
                 epoch_time = int(time.time())
                 metadata.add_text("parameters", png_response.json().get("info"))
                 file_path = f'{settings.global_var.dir}/{epoch_time}-{queue_object.seed}-{file_name[0:120]}-{i}.png'
+                # save json payload to file
+                with open(f'{file_path}.json', 'w') as f:
+                    json.dump(payload, f, indent=4)
                 image.save(file_path, pnginfo=metadata)
                 print(f'Saved image: {file_path}')
 
