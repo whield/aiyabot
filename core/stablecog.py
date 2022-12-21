@@ -368,7 +368,6 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
                 s.post(settings.global_var.url + '/login')
 
             # only send model payload if one is defined
-            print(model_payload, payload)
             if settings.global_var.send_model:
                 s.post(url=f'{settings.global_var.url}/sdapi/v1/options', json=model_payload)
             if queue_object.init_image is not None:
