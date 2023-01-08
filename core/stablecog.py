@@ -6,7 +6,6 @@ import random
 import requests
 import time
 import traceback
-import json
 from asyncio import AbstractEventLoop
 from PIL import Image, PngImagePlugin
 from discord import option
