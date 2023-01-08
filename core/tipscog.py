@@ -60,7 +60,7 @@ class TipsView(View):
         for key, value in settings.global_var.style_names.items():
             if value == '':
                 value = ' '
-            style_list = style_list + f'\n{key} - ``{value}``'
+            style_list += f'\n{key} - ``{value}``'
         embed_styles = discord.Embed(title="Styles list", description=style_list)
         embed_styles.colour = settings.global_var.embed_color
 
@@ -78,11 +78,33 @@ class TipsView(View):
             # strip any folders from model full name
             value = value.split('/', 1)[-1].split('\\', 1)[-1]
 
-            model_list = model_list + f'\n{key} - ``{value}``'
+            model_list += f'\n{key} - ``{value}``'
         embed_model = discord.Embed(title="Models list", description=model_list)
         embed_model.colour = settings.global_var.embed_color
 
         await interaction.response.edit_message(embed=embed_model)
+
+    @discord.ui.button(
+        custom_id="button_embed",
+        label="Embeddings list")
+    async def button_embed(self, button, interaction):
+
+        embed_1_list, embed_2_list = '', ''
+        for value in settings.global_var.embeddings_1:
+            if value == '':
+                value = ' '
+            embed_1_list += f'\n``{value}``'
+        for value in settings.global_var.embeddings_2:
+            if value == '':
+                value = ' '
+            embed_2_list += f'\n``{value}``'
+        embed_embed = discord.Embed(title="Embeddings list")
+        embed_embed.colour = settings.global_var.embed_color
+
+        embed_embed.add_field(name="SD 1.X embeddings", value=embed_1_list, inline=True)
+        embed_embed.add_field(name="SD 2.X embeddings", value=embed_2_list, inline=True)
+
+        await interaction.response.edit_message(embed=embed_embed)
 
     @discord.ui.button(
         custom_id="button_about",

@@ -7,7 +7,7 @@ A Discord bot interface for Stable Diffusion
 ## Setup requirements
 
 - Set up [AUTOMATIC1111's Stable Diffusion AI Web UI](https://github.com/AUTOMATIC1111/stable-diffusion-webui).
-  - AIYA is currently tested on commit `685f9631b56ff8bd43bce24ff5ce0f9a0e9af490` of the Web UI.
+  - AIYA is currently tested on commit `5f4fa942b8ec3ed3b15a352903489d6f9e6eb46e` of the Web UI.
 - Run the Web UI as local host with api (`COMMANDLINE_ARGS= --listen --api`).
 - Clone this repo.
 - Create a text file in your cloned repo called ".env", formatted like so:
@@ -39,6 +39,7 @@ To generate an image from text, use the /draw command and include your prompt as
 - face restoration
 - high-res fix
 - CLIP skip
+- hypernetworks
 
 #### Bonus features
 
@@ -49,9 +50,11 @@ To generate an image from text, use the /draw command and include your prompt as
   - sampling method
   - batch count / max batch count
   - CLIP skip
+  - hypernetworks
+  - refresh (update AIYA's options with any changes from Web UI)
 - /identify command - create a caption for your image.
 - /stats command - shows how many /draw commands have been used.
-- /tips command - basic tips for writing prompts.
+- /tips command - basic tips for writing prompts and other info.
 - /upscale command - resize your image.
 - buttons - certain outputs will contain buttons.
   - 🖋 - edit prompt, then generate a new image with same parameters.

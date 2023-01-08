@@ -42,6 +42,12 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
             style for style in settings.global_var.style_names
         ]
 
+    # and hypernetworks
+    def hyper_autocomplete(self: discord.AutocompleteContext):
+        return [
+            hyper for hyper in settings.global_var.hyper_names
+        ]
+
     @commands.slash_command(name='draw', description='Create an image')
     @option(
         'prompt',
@@ -58,7 +64,7 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
     @option(
         'data_model',
         str,
-        description='Select the data model for image generation',
+        description='Select the data model for image generation.',
         required=False,
         autocomplete=discord.utils.basic_autocomplete(model_autocomplete),
     )
@@ -72,34 +78,34 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
     @option(
         'width',
         int,
-        description='Width of the generated image',
+        description='Width of the generated image.',
         required=False,
-        choices=[x for x in range(192, 1088, 64)]
+        choices=[x for x in settings.global_var.size_range]
     )
     @option(
         'height',
         int,
-        description='Height of the generated image',
+        description='Height of the generated image.',
         required=False,
-        choices=[x for x in range(192, 1088, 64)]
+        choices=[x for x in settings.global_var.size_range]
     )
     @option(
         'guidance_scale',
         str,
-        description='Classifier-Free Guidance scale',
+        description='Classifier-Free Guidance scale.',
         required=False,
     )
     @option(
         'sampler',
         str,
-        description='The sampler to use for generation',
+        description='The sampler to use for generation.',
         required=False,
         choices=settings.global_var.sampler_names,
     )
     @option(
         'seed',
         int,
-        description='The seed to use for reproducibility',
+        description='The seed to use for reproducibility.',
         required=False,
     )
     @option(
@@ -148,9 +154,16 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
     @option(
         'clip_skip',
         int,
-        description='Number of last layers of CLIP model to skip',
+        description='Number of last layers of CLIP model to skip.',
         required=False,
         choices=[x for x in range(1, 13, 1)]
+    )
+    @option(
+        'hypernet',
+        str,
+        description='Apply a hypernetwork model to influence the output.',
+        required=False,
+        autocomplete=discord.utils.basic_autocomplete(hyper_autocomplete),
     )
     async def dream_handler(self, ctx: discord.ApplicationContext, *,
                             prompt: str, negative_prompt: str = 'unset',
@@ -167,7 +180,8 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
                             style: Optional[str] = 'None',
                             facefix: Optional[str] = 'None',
                             highres_fix: Optional[bool] = False,
-                            clip_skip: Optional[int] = 0):
+                            clip_skip: Optional[int] = 0,
+                            hypernet: Optional[str] = None):
 
         settings.global_var.send_model = False
         # update defaults with any new defaults from settingscog
@@ -186,6 +200,8 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
             sampler = settings.read(guild)['sampler']
         if clip_skip == 0:
             clip_skip = settings.read(guild)['clip_skip']
+        if hypernet is None:
+            hypernet = settings.read(guild)['hypernet']
 
         # if a model is not selected, do nothing
         model_name = 'Default'
@@ -210,7 +226,7 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
                 prompt = prompt.lstrip(' ')
                 break
             # get the index of the selected model for later use
-            model_index = model_index + 1
+            model_index += 1
 
         # if using model "short name" in csv, find its respective title for payload
         for title, name in settings.global_var.simple_model_pairs.items():
@@ -238,37 +254,44 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
         # lower step value to the highest setting if user goes over max steps
         if steps > settings.read(guild)['max_steps']:
             steps = settings.read(guild)['max_steps']
-            reply_adds = reply_adds + f'\nExceeded maximum of ``{steps}`` steps! This is the best I can do...'
+            reply_adds += f'\nExceeded maximum of ``{steps}`` steps! This is the best I can do...'
         if model_name != 'Default':
-            reply_adds = reply_adds + f'\nModel: ``{model_name}``'
+            reply_adds += f'\nModel: ``{model_name}``'
         if negative_prompt != '':
-            reply_adds = reply_adds + f'\nNegative Prompt: ``{negative_prompt}``'
+            reply_adds += f'\nNegative Prompt: ``{negative_prompt}``'
         if (width != 512) or (height != 512):
-            reply_adds = reply_adds + f'\nSize: ``{width}``x``{height}``'
+            reply_adds += f'\nSize: ``{width}``x``{height}``'
         if guidance_scale != '7.0':
-            reply_adds = reply_adds + f'\nGuidance Scale: ``{guidance_scale}``'
+            try:
+                float(guidance_scale)
+                reply_adds += f'\nGuidance Scale: ``{guidance_scale}``'
+            except(Exception,):
+                reply_adds += f"\nGuidance Scale can't be ``{guidance_scale}``! Setting to default of `7.0`."
+                guidance_scale = 7.0
         if sampler != 'Euler a':
-            reply_adds = reply_adds + f'\nSampler: ``{sampler}``'
+            reply_adds += f'\nSampler: ``{sampler}``'
         if init_image:
-            reply_adds = reply_adds + f'\nStrength: ``{strength}``'
-            reply_adds = reply_adds + f'\nURL Init Image: ``{init_image.url}``'
+            reply_adds += f'\nStrength: ``{strength}``'
+            reply_adds += f'\nURL Init Image: ``{init_image.url}``'
         if count != 1:
             max_count = settings.read(guild)['max_count']
             if count > max_count:
                 count = max_count
-                reply_adds = reply_adds + f'\nExceeded maximum of ``{count}`` images! This is the best I can do...'
-            reply_adds = reply_adds + f'\nCount: ``{count}``'
+                reply_adds += f'\nExceeded maximum of ``{count}`` images! This is the best I can do...'
+            reply_adds += f'\nCount: ``{count}``'
         if style != 'None':
-            reply_adds = reply_adds + f'\nStyle: ``{style}``'
+            reply_adds += f'\nStyle: ``{style}``'
+        if hypernet != 'None':
+            reply_adds += f'\nHypernet: ``{hypernet}``'
         if facefix != 'None':
-            reply_adds = reply_adds + f'\nFace restoration: ``{facefix}``'
+            reply_adds += f'\nFace restoration: ``{facefix}``'
         if clip_skip != 1:
-            reply_adds = reply_adds + f'\nCLIP skip: ``{clip_skip}``'
+            reply_adds += f'\nCLIP skip: ``{clip_skip}``'
 
         # set up tuple of parameters to pass into the Discord view
         input_tuple = (
             ctx, prompt, negative_prompt, data_model, steps, width, height, guidance_scale, sampler, seed, strength,
-            init_image, count, style, facefix, highres_fix, clip_skip, simple_prompt, model_index)
+            init_image, count, style, facefix, highres_fix, clip_skip, simple_prompt, model_index, hypernet)
         view = viewhandler.DrawView(input_tuple)
         # set up tuple of queues to pass into union()
         queues = (queuehandler.GlobalQueue.draw_q, queuehandler.GlobalQueue.upscale_q, queuehandler.GlobalQueue.identify_q)
@@ -350,6 +373,8 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
                     "restore_faces": True,
                 }
                 payload.update(facefix_payload)
+            if queue_object.hypernet != 'None':
+                override_settings["sd_hypernetwork"] = queue_object.hypernet
 
             # update payload with override_settings
             override_payload = {
@@ -425,6 +450,10 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
                     queue_object.ctx.channel.send(content=f'<@{queue_object.ctx.author.id}>, {message}', files=files,
                                                   view=queue_object.view))
 
+        except KeyError:
+            embed = discord.Embed(title='txt2img failed', description=f'An invalid parameter was found!',
+                                  color=settings.global_var.embed_color)
+            event_loop.create_task(queue_object.ctx.channel.send(embed=embed))
         except Exception as e:
             embed = discord.Embed(title='txt2img failed', description=f'{e}\n{traceback.print_exc()}',
                                   color=settings.global_var.embed_color)
