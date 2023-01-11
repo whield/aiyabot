@@ -30,6 +30,7 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
         self.bot.add_view(viewhandler.DrawView(self))
 
     # pulls from model_names list and makes some sort of dynamic list to bypass Discord 25 choices limit
+    # this also updates list when using /settings "refresh" option
     def model_autocomplete(self: discord.AutocompleteContext):
         return [
             model for model in settings.global_var.model_names
@@ -45,6 +46,12 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
     def hyper_autocomplete(self: discord.AutocompleteContext):
         return [
             hyper for hyper in settings.global_var.hyper_names
+        ]
+
+    # and upscalers for highres fix
+    def hires_autocomplete(self: discord.AutocompleteContext):
+        return [
+            hires for hires in settings.global_var.hires_upscaler_names
         ]
 
     @commands.slash_command(name='draw', description='Create an image')
@@ -108,6 +115,41 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
         required=False,
     )
     @option(
+        'style',
+        str,
+        description='Apply a predefined style to the generation.',
+        required=False,
+        autocomplete=discord.utils.basic_autocomplete(style_autocomplete),
+    )
+    @option(
+        'facefix',
+        str,
+        description='Tries to improve faces in images.',
+        required=False,
+        choices=settings.global_var.facefix_models,
+    )
+    @option(
+        'highres_fix',
+        str,
+        description='Tries to fix issues from generating high-res images. Recommended: Latent (nearest).',
+        required=False,
+        autocomplete=discord.utils.basic_autocomplete(hires_autocomplete),
+    )
+    @option(
+        'clip_skip',
+        int,
+        description='Number of last layers of CLIP model to skip.',
+        required=False,
+        choices=[x for x in range(1, 13, 1)]
+    )
+    @option(
+        'hypernet',
+        str,
+        description='Apply a hypernetwork model to influence the output.',
+        required=False,
+        autocomplete=discord.utils.basic_autocomplete(hyper_autocomplete),
+    )
+    @option(
         'strength',
         str,
         description='The amount in which init_image will be altered (0.0 to 1.0).'
@@ -130,57 +172,23 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
         description='The number of images to generate. This is "Batch count", not "Batch size".',
         required=False,
     )
-    @option(
-        'style',
-        str,
-        description='Apply a predefined style to the generation.',
-        required=False,
-        autocomplete=discord.utils.basic_autocomplete(style_autocomplete),
-    )
-    @option(
-        'facefix',
-        str,
-        description='Tries to improve faces in images.',
-        required=False,
-        choices=settings.global_var.facefix_models,
-    )
-    @option(
-        'highres_fix',
-        bool,
-        description='Tries to fix issues from generating high-res images. Takes longer!',
-        required=False,
-    )
-    @option(
-        'clip_skip',
-        int,
-        description='Number of last layers of CLIP model to skip.',
-        required=False,
-        choices=[x for x in range(1, 13, 1)]
-    )
-    @option(
-        'hypernet',
-        str,
-        description='Apply a hypernetwork model to influence the output.',
-        required=False,
-        autocomplete=discord.utils.basic_autocomplete(hyper_autocomplete),
-    )
     async def dream_handler(self, ctx: discord.ApplicationContext, *,
                             prompt: str, negative_prompt: str = 'unset',
                             data_model: Optional[str] = None,
                             steps: Optional[int] = -1,
                             width: Optional[int] = 1, height: Optional[int] = 1,
-                            guidance_scale: Optional[str] = '7.0',
+                            guidance_scale: Optional[str] = None,
                             sampler: Optional[str] = 'unset',
                             seed: Optional[int] = -1,
+                            style: Optional[str] = 'None',
+                            facefix: Optional[str] = 'None',
+                            highres_fix: Optional[str] = 'Disabled',
+                            clip_skip: Optional[int] = 0,
+                            hypernet: Optional[str] = None,
                             strength: Optional[str] = '0.75',
                             init_image: Optional[discord.Attachment] = None,
                             init_url: Optional[str],
-                            count: Optional[int] = None,
-                            style: Optional[str] = 'None',
-                            facefix: Optional[str] = 'None',
-                            highres_fix: Optional[bool] = False,
-                            clip_skip: Optional[int] = 0,
-                            hypernet: Optional[str] = None):
+                            count: Optional[int] = None):
 
         settings.global_var.send_model = False
         # update defaults with any new defaults from settingscog
@@ -193,6 +201,8 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
             width = settings.read(guild)['default_width']
         if height == 1:
             height = settings.read(guild)['default_height']
+        if guidance_scale is None:
+            guidance_scale = settings.read(guild)['guidance_scale']
         if count is None:
             count = settings.read(guild)['default_count']
         if sampler == 'unset':
@@ -356,10 +366,12 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
                 payload.update(img_payload)
 
             # update payload if high-res fix is used
-            if queue_object.highres_fix:
+            if queue_object.highres_fix != 'Disabled':
                 highres_payload = {
-                    "enable_hr": queue_object.highres_fix,
+                    "enable_hr": True,
+                    "hr_upscaler": queue_object.highres_fix,
                     "hr_scale": 1,
+                    "hr_second_pass_steps": queue_object.steps/2,
                     "denoising_strength": queue_object.strength
                 }
                 payload.update(highres_payload)

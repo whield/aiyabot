@@ -19,6 +19,7 @@ template = {
     "max_steps": 50,
     "default_width": 512,
     "default_height": 512,
+    "guidance_scale": 7.0,
     "sampler": "Euler a",
     "default_count": 1,
     "max_count": 1,
@@ -51,6 +52,8 @@ class GlobalVar:
     embeddings_1 = []
     embeddings_2 = []
     hyper_names = []
+    upscaler_names = []
+    hires_upscaler_names = []
 
 
 global_var = GlobalVar()
@@ -255,6 +258,23 @@ def populate_global_vars():
     global_var.hyper_names.append('None')
     for s6 in r6.json():
         global_var.hyper_names.append(s6['name'])
+
+    # upscaler API does not pull info properly, so use the old way
+    config_url = s.get(global_var.url + "/config")
+    old_config = config_url.json()
+    try:
+        for c in old_config['components']:
+            try:
+                if c['props']:
+                    if c['props']['elem_id'] == 'extras_upscaler_1':
+                        global_var.upscaler_names = c['props']['choices']
+                    if c['props']['elem_id'] == 'txt2img_hr_upscaler':
+                        global_var.hires_upscaler_names = c['props']['choices']
+            except(Exception,):
+                pass
+    except(Exception,):
+        print("Trouble accessing Web UI config! I can't pull the upscaler list")
+    global_var.hires_upscaler_names.append('Disabled')
 
 
 def guilds_check(self):
