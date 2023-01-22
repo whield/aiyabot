@@ -21,10 +21,11 @@ template = {
     "default_height": 512,
     "guidance_scale": "7.0",
     "sampler": "Euler a",
-    "default_count": 1,
-    "max_count": 1,
+    "highres_fix": 'Disabled',
     "clip_skip": 1,
-    "hypernet": "None"
+    "hypernet": "None",
+    "default_count": 1,
+    "max_count": 1
 }
 
 
@@ -228,6 +229,11 @@ def populate_global_vars():
             print("Can't connect to API for some reason!"
                   "Please check your .env URL or credentials.")
             os.system("pause")
+
+    # add default "None" options
+    global_var.style_names['None'] = ''
+    global_var.hyper_names.append('None')
+    # populate remaining options
     for s2 in r2.json():
         global_var.style_names[s2['name']] = s2['prompt']
     for s3 in r3.json():
@@ -242,14 +248,12 @@ def populate_global_vars():
             global_var.embeddings_1.append(s4)
         if shape['shape'] == 1024:
             global_var.embeddings_2.append(s4)
-    # add default "None" hypernetwork as option
-    global_var.hyper_names.append('None')
     for s5 in r5.json():
         global_var.hyper_names.append(s5['name'])
 
     # create nested dict for models based on display_name in models.csv
     # model_info[0] = display name (top level)
-    # model_info[1][0] = filename. this is sent to the API
+    # model_info[1][0] = "title". this is sent to the API
     # model_info[1][1] = name of the model
     # model_info[1][2] = shorthash
     # model_info[1][3] = activator token

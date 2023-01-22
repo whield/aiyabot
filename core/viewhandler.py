@@ -31,8 +31,6 @@ input_tuple[0] = ctx
 tuple_names = ['ctx', 'prompt', 'negative_prompt', 'data_model', 'steps', 'width', 'height', 'guidance_scale',
                'sampler', 'seed', 'strength', 'init_image', 'batch_count', 'style', 'facefix', 'highres_fix',
                'clip_skip', 'simple_prompt', 'hypernet']
-# set up tuple of queues to pass into union()
-queues = (queuehandler.GlobalQueue.draw_q, queuehandler.GlobalQueue.upscale_q, queuehandler.GlobalQueue.identify_q)
 
 
 # the modal that is used for the 🖋 button
@@ -65,14 +63,14 @@ class DrawModal(Modal):
         )
 
         # set up parameters for full edit mode. first get model display name
-        model_name = 'Default'
+        display_name = 'Default'
         index_start = 4
         for model in settings.global_var.model_info.items():
             if model[1][0] == input_tuple[3]:
-                model_name = model[0]
+                display_name = model[0]
                 break
         # expose each available (supported) option, even if output didn't use them
-        ex_params = f'data_model:{model_name}'
+        ex_params = f'data_model:{display_name}'
         for index, value in enumerate(tuple_names[index_start:], index_start):
             if 9 <= index <= 12 or index == 15 or index == 17:
                 continue
@@ -203,6 +201,9 @@ class DrawModal(Modal):
             # update the prompt again if a valid model change is requested
             if model_found:
                 pen[1] = new_token + pen[17]
+            # if a hypernetwork is added, append it to prompt
+            if pen[18] != 'None':
+                pen[1] += f' <hypernet:{pen[18]}:1>'
 
             # the updated tuple to send to queue
             prompt_tuple = tuple(pen)
@@ -210,13 +211,13 @@ class DrawModal(Modal):
 
             # message additions if anything was changed
             prompt_output = f'\nNew prompt: ``{pen[17]}``'
-            if pen[2] != '':
+            if pen[2] != '' and pen[2] != self.input_tuple[2]:
                 prompt_output += f'\nNew negative prompt: ``{pen[2]}``'
             if str(pen[3]) != str(self.input_tuple[3]):
                 prompt_output += f'\nNew model: ``{new_model}``'
             index_start = 4
             for index, value in enumerate(tuple_names[index_start:], index_start):
-                if 17 <= index <= 18:
+                if index == 17:
                     continue
                 if str(pen[index]) != str(self.input_tuple[index]):
                     prompt_output += f'\nNew {value}: ``{pen[index]}``'
@@ -225,15 +226,15 @@ class DrawModal(Modal):
             if queuehandler.GlobalQueue.dream_thread.is_alive():
                 if self.input_tuple[3] != '':
                     settings.global_var.send_model = True
-                queuehandler.GlobalQueue.draw_q.append(queuehandler.DrawObject(*prompt_tuple, DrawView(prompt_tuple)))
+                queuehandler.GlobalQueue.queue.append(queuehandler.DrawObject(stablecog.StableCog(self), *prompt_tuple, DrawView(prompt_tuple)))
                 await interaction.response.send_message(
-                    f'<@{interaction.user.id}>, {settings.messages()}\nQueue: ``{len(queuehandler.union(*queues))}``{prompt_output}')
+                    f'<@{interaction.user.id}>, {settings.messages()}\nQueue: ``{len(queuehandler.GlobalQueue.queue)}``{prompt_output}')
             else:
                 if self.input_tuple[3] != '':
                     settings.global_var.send_model = True
-                await queuehandler.process_dream(draw_dream, queuehandler.DrawObject(*prompt_tuple, DrawView(prompt_tuple)))
+                await queuehandler.process_dream(draw_dream, queuehandler.DrawObject(stablecog.StableCog(self), *prompt_tuple, DrawView(prompt_tuple)))
                 await interaction.response.send_message(
-                    f'<@{interaction.user.id}>, {settings.messages()}\nQueue: ``{len(queuehandler.union(*queues))}``{prompt_output}')
+                    f'<@{interaction.user.id}>, {settings.messages()}\nQueue: ``{len(queuehandler.GlobalQueue.queue)}``{prompt_output}')
 
 
 # creating the view that holds the buttons for /draw output
@@ -254,7 +255,7 @@ class DrawView(View):
                 # if there's room in the queue, open up the modal
                 if queuehandler.GlobalQueue.dream_thread.is_alive():
                     user_already_in_queue = False
-                    for queue_object in queuehandler.union(*queues):
+                    for queue_object in queuehandler.GlobalQueue.queue:
                         if queue_object.ctx.author.id == interaction.user.id:
                             user_already_in_queue = True
                             break
@@ -292,7 +293,7 @@ class DrawView(View):
                 draw_dream = stablecog.StableCog(self)
                 if queuehandler.GlobalQueue.dream_thread.is_alive():
                     user_already_in_queue = False
-                    for queue_object in queuehandler.union(*queues):
+                    for queue_object in queuehandler.GlobalQueue.queue:
                         if queue_object.ctx.author.id == interaction.user.id:
                             user_already_in_queue = True
                             break
@@ -306,11 +307,10 @@ class DrawView(View):
                         if self.input_tuple[3] != '':
                             settings.global_var.send_model = True
 
-                        queuehandler.GlobalQueue.draw_q.append(
-                            queuehandler.DrawObject(*seed_tuple, DrawView(seed_tuple)))
+                        queuehandler.GlobalQueue.queue.append(queuehandler.DrawObject(stablecog.StableCog(self), *seed_tuple, DrawView(seed_tuple)))
                         await interaction.followup.send(
                             f'<@{interaction.user.id}>, {settings.messages()}\nQueue: '
-                            f'``{len(queuehandler.union(*queues))}`` - ``{seed_tuple[17]}``'
+                            f'``{len(queuehandler.GlobalQueue.queue)}`` - ``{seed_tuple[17]}``'
                             f'\nNew seed:``{seed_tuple[9]}``')
                 else:
                     button.disabled = True
@@ -319,11 +319,10 @@ class DrawView(View):
                     if self.input_tuple[3] != '':
                         settings.global_var.send_model = True
 
-                    await queuehandler.process_dream(draw_dream,
-                                                     queuehandler.DrawObject(*seed_tuple, DrawView(seed_tuple)))
+                    await queuehandler.process_dream(draw_dream, queuehandler.DrawObject(stablecog.StableCog(self), *seed_tuple, DrawView(seed_tuple)))
                     await interaction.followup.send(
                         f'<@{interaction.user.id}>, {settings.messages()}\nQueue: '
-                        f'``{len(queuehandler.union(*queues))}`` - ``{seed_tuple[17]}``'
+                        f'``{len(queuehandler.GlobalQueue.queue)}`` - ``{seed_tuple[17]}``'
                         f'\nNew Seed:``{seed_tuple[9]}``')
             else:
                 await interaction.response.send_message("You can't use other people's 🎲!", ephemeral=True)
@@ -342,31 +341,31 @@ class DrawView(View):
         # simpler variable name
         rev = self.input_tuple
         # initial dummy data for a default models.csv
-        model_name = 'Default'
-        filename, model_hash = 'Unknown', 'Unknown'
+        display_name = 'Default'
+        model_name, model_hash = 'Unknown', 'Unknown'
         activator_token = ''
         try:
-            # get the remaining model information we want from the data_model (filename) in the tuple
+            # get the remaining model information we want from the data_model ("title") in the tuple
             for model in settings.global_var.model_info.items():
                 if model[1][0] == rev[3]:
-                    model_name = model[0]
-                    filename = rev[3]
+                    display_name = model[0]
+                    model_name = model[1][1]
                     model_hash = model[1][2]
                     if model[1][3]:
                         activator_token = f'\nActivator token - ``{model[1][3]}``'
                     break
 
-            # strip any folders from model filename
-            filename = filename.split('/', 1)[-1].split('\\', 1)[-1]
+            # strip any folders from model name
+            model_name = model_name.split('_', 1)[-1]
 
             # generate the command for copy-pasting, and also add embed fields
             embed = discord.Embed(title="About the image!", description="")
             embed.colour = settings.global_var.embed_color
             embed.add_field(name=f'Prompt', value=f'``{rev[17]}``', inline=False)
-            embed.add_field(name='Data model', value=f'Display name - ``{model_name}``\nFilename - ``{filename}``'
-                                      f'\nShorthash - ``{model_hash}``{activator_token}', inline=False)
+            embed.add_field(name='Data model', value=f'Display name - ``{display_name}``\nModel name - ``{model_name}``'
+                                                     f'\nShorthash - ``{model_hash}``{activator_token}', inline=False)
 
-            copy_command = f'/draw prompt:{rev[17]} data_model:{model_name} steps:{rev[4]} width:{rev[5]} ' \
+            copy_command = f'/draw prompt:{rev[17]} data_model:{display_name} steps:{rev[4]} width:{rev[5]} ' \
                            f'height:{rev[6]} guidance_scale:{rev[7]} sampler:{rev[8]} seed:{rev[9]}'
             if rev[2] != '':
                 copy_command += f' negative_prompt:{rev[2]}'
@@ -393,7 +392,7 @@ class DrawView(View):
                 extra_params += f'\nCLIP skip: ``{rev[16]}``'
             if rev[18] != 'None':
                 copy_command += f' hypernet:{rev[18]}'
-                extra_params += f'\nHypernetwork model(hash): ``{rev[18]}``'
+                extra_params += f'\nHypernetwork model: ``{rev[18]}``'
             embed.add_field(name=f'Other parameters', value=extra_params, inline=False)
             embed.add_field(name=f'Command for copying', value=f'``{copy_command}``', inline=False)
 

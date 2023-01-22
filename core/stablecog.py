@@ -10,13 +10,12 @@ from asyncio import AbstractEventLoop
 from PIL import Image, PngImagePlugin
 from discord import option
 from discord.ext import commands
+from threading import Thread
 from typing import Optional
 
 from core import queuehandler
 from core import viewhandler
 from core import settings
-from core import upscalecog
-from core import identifycog
 
 
 class StableCog(commands.Cog, name='Stable Diffusion', description='Create images from natural language.'):
@@ -42,7 +41,7 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
             style for style in settings.global_var.style_names
         ]
 
-    # and hypernetworks
+    # and hyper networks
     def hyper_autocomplete(self: discord.AutocompleteContext):
         return [
             hyper for hyper in settings.global_var.hyper_names
@@ -182,7 +181,7 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
                             seed: Optional[int] = -1,
                             style: Optional[str] = 'None',
                             facefix: Optional[str] = 'None',
-                            highres_fix: Optional[str] = 'Disabled',
+                            highres_fix: Optional[str] = None,
                             clip_skip: Optional[int] = 0,
                             hypernet: Optional[str] = None,
                             strength: Optional[str] = '0.75',
@@ -203,14 +202,16 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
             height = settings.read(guild)['default_height']
         if guidance_scale is None:
             guidance_scale = settings.read(guild)['guidance_scale']
-        if count is None:
-            count = settings.read(guild)['default_count']
         if sampler == 'unset':
             sampler = settings.read(guild)['sampler']
+        if highres_fix is None:
+            highres_fix = settings.read(guild)['highres_fix']
         if clip_skip == 0:
             clip_skip = settings.read(guild)['clip_skip']
         if hypernet is None:
             hypernet = settings.read(guild)['hypernet']
+        if count is None:
+            count = settings.read(guild)['default_count']
 
         # if a model is not selected, do nothing
         model_name = 'Default'
@@ -226,18 +227,20 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
         for model in settings.global_var.model_info.items():
             if model[0] == data_model:
                 model_name = model[0]
-                # go one deeper into nest and grab model full name to send to API
                 data_model = model[1][0]
                 # look at the model for activator token and prepend prompt with it
                 if model[1][3]:
                     prompt = model[1][3] + " " + prompt
                 break
 
+        # if a hyper network is used, append it to the prompt
+        if hypernet != 'None':
+            prompt += f' <hypernet:{hypernet}:1>'
+
         if not settings.global_var.send_model:
             print(f'Request -- {ctx.author.name}#{ctx.author.discriminator} -- Prompt: {prompt}')
         else:
-            print(
-                f'Request -- {ctx.author.name}#{ctx.author.discriminator} -- Prompt: {prompt} -- Using model: {data_model}')
+            print(f'Request -- {ctx.author.name}#{ctx.author.discriminator} -- Prompt: {prompt} -- Using model: {data_model}')
 
         if seed == -1:
             seed = random.randint(0, 0xFFFFFFFF)
@@ -293,25 +296,35 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
             ctx, prompt, negative_prompt, data_model, steps, width, height, guidance_scale, sampler, seed, strength,
             init_image, count, style, facefix, highres_fix, clip_skip, simple_prompt, hypernet)
         view = viewhandler.DrawView(input_tuple)
-        # set up tuple of queues to pass into union()
-        queues = (queuehandler.GlobalQueue.draw_q, queuehandler.GlobalQueue.upscale_q, queuehandler.GlobalQueue.identify_q)
         # setup the queue
         if queuehandler.GlobalQueue.dream_thread.is_alive():
             user_already_in_queue = False
-            for queue_object in queuehandler.union(*queues):
+            for queue_object in queuehandler.GlobalQueue.queue:
                 if queue_object.ctx.author.id == ctx.author.id:
                     user_already_in_queue = True
                     break
             if user_already_in_queue:
                 await ctx.send_response(content=f'Please wait! You\'re queued up.', ephemeral=True)
             else:
-                queuehandler.GlobalQueue.draw_q.append(queuehandler.DrawObject(*input_tuple, view))
+                queuehandler.GlobalQueue.queue.append(queuehandler.DrawObject(self, *input_tuple, view))
                 await ctx.send_response(
-                    f'<@{ctx.author.id}>, {settings.messages()}\nQueue: ``{len(queuehandler.union(*queues))}`` - ``{simple_prompt}``\nSteps: ``{steps}`` - Seed: ``{seed}``{reply_adds}')
+                    f'<@{ctx.author.id}>, {settings.messages()}\nQueue: ``{len(queuehandler.GlobalQueue.queue)}`` - ``{simple_prompt}``\nSteps: ``{steps}`` - Seed: ``{seed}``{reply_adds}')
         else:
-            await queuehandler.process_dream(self, queuehandler.DrawObject(*input_tuple, view))
+            await queuehandler.process_dream(self, queuehandler.DrawObject(self, *input_tuple, view))
             await ctx.send_response(
-                f'<@{ctx.author.id}>, {settings.messages()}\nQueue: ``{len(queuehandler.union(*queues))}`` - ``{simple_prompt}``\nSteps: ``{steps}`` - Seed: ``{seed}``{reply_adds}')
+                f'<@{ctx.author.id}>, {settings.messages()}\nQueue: ``{len(queuehandler.GlobalQueue.queue)}`` - ``{simple_prompt}``\nSteps: ``{steps}`` - Seed: ``{seed}``{reply_adds}')
+
+    # the function to queue Discord posts
+    def post(self, event_loop: AbstractEventLoop, post_queue_object: queuehandler.PostObject):
+        event_loop.create_task(
+            post_queue_object.ctx.channel.send(
+                content=post_queue_object.content,
+                files=post_queue_object.files,
+                view=post_queue_object.view
+            )
+        )
+        if queuehandler.GlobalQueue.post_queue:
+            self.post(self.event_loop, self.queue.pop(0))
 
     # generate the image
     def dream(self, event_loop: AbstractEventLoop, queue_object: queuehandler.DrawObject):
@@ -362,7 +375,7 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
                     "enable_hr": True,
                     "hr_upscaler": queue_object.highres_fix,
                     "hr_scale": 1,
-                    "hr_second_pass_steps": queue_object.steps/2,
+                    "hr_second_pass_steps": int(queue_object.steps)/2,
                     "denoising_strength": queue_object.strength
                 }
                 payload.update(highres_payload)
@@ -376,8 +389,6 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
                     "restore_faces": True,
                 }
                 payload.update(facefix_payload)
-            if queue_object.hypernet != 'None':
-                override_settings["sd_hypernetwork"] = queue_object.hypernet
 
             # update payload with override_settings
             override_payload = {
@@ -407,7 +418,7 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
 
             # create safe/sanitized filename
             keep_chars = (' ', '.', '_')
-            file_name = "".join(c for c in queue_object.prompt if c.isalnum() or c in keep_chars).rstrip()
+            file_name = "".join(c for c in queue_object.simple_prompt if c.isalnum() or c in keep_chars).rstrip()
 
             # save local copy of image and prepare PIL images
             pil_images = []
@@ -432,23 +443,26 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
             settings.stats_count(queue_object.batch_count)
 
             # post to discord
-            with contextlib.ExitStack() as stack:
-                buffer_handles = [stack.enter_context(io.BytesIO()) for _ in pil_images]
+            def post_dream():
+                with contextlib.ExitStack() as stack:
+                    buffer_handles = [stack.enter_context(io.BytesIO()) for _ in pil_images]
 
-                image_count = len(pil_images)
-                noun_descriptor = "drawing" if image_count == 1 else f'{image_count} drawings'
+                    image_count = len(pil_images)
+                    noun_descriptor = "drawing" if image_count == 1 else f'{image_count} drawings'
 
-                for (pil_image, buffer) in zip(pil_images, buffer_handles):
-                    pil_image.save(buffer, 'PNG')
-                    buffer.seek(0)
-                draw_time = '{0:.3f}'.format(end_time - start_time)
-                message = f'my {noun_descriptor} of ``{queue_object.simple_prompt}`` took me ``{draw_time}`` ' \
-                          f'seconds!\n> *{queue_object.ctx.author.name}#{queue_object.ctx.author.discriminator}*'
-                files = [discord.File(fp=buffer, filename=f'{queue_object.seed}-{i}.png') for (i, buffer) in
-                         enumerate(buffer_handles)]
-                event_loop.create_task(
-                    queue_object.ctx.channel.send(content=f'<@{queue_object.ctx.author.id}>, {message}', files=files,
-                                                  view=queue_object.view))
+                    for (pil_image, buffer) in zip(pil_images, buffer_handles):
+                        pil_image.save(buffer, 'PNG', pnginfo=metadata)
+                        buffer.seek(0)
+                    draw_time = '{0:.3f}'.format(end_time - start_time)
+                    message = f'my {noun_descriptor} of ``{queue_object.simple_prompt}`` took me ``{draw_time}`` ' \
+                              f'seconds!\n> *{queue_object.ctx.author.name}#{queue_object.ctx.author.discriminator}*'
+                    files = [discord.File(fp=buffer, filename=f'{queue_object.seed}-{i}.png') for (i, buffer) in
+                             enumerate(buffer_handles)]
+
+                    queuehandler.process_post(
+                        self, queuehandler.PostObject(
+                            self, queue_object.ctx, content=f'<@{queue_object.ctx.author.id}>, {message}', file='', files=files, embed='', view=queue_object.view))
+            Thread(target=post_dream, daemon=True).start()
 
         except KeyError:
             embed = discord.Embed(title='txt2img failed', description=f'An invalid parameter was found!',
@@ -459,15 +473,7 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
                                   color=settings.global_var.embed_color)
             event_loop.create_task(queue_object.ctx.channel.send(embed=embed))
         # check each queue for any remaining tasks
-        if queuehandler.GlobalQueue.draw_q:
-            event_loop.create_task(queuehandler.process_dream(self, queuehandler.GlobalQueue.draw_q.pop(0)))
-        if queuehandler.GlobalQueue.upscale_q:
-            upscale_dream = upscalecog.UpscaleCog(self)
-            event_loop.create_task(queuehandler.process_dream(upscale_dream, queuehandler.GlobalQueue.upscale_q.pop(0)))
-        if queuehandler.GlobalQueue.identify_q:
-            identify_dream = identifycog.IdentifyCog(self)
-            event_loop.create_task(
-                queuehandler.process_dream(identify_dream, queuehandler.GlobalQueue.identify_q.pop(0)))
+        queuehandler.process_queue()
 
 
 def setup(bot):
