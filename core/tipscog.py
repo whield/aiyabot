@@ -97,6 +97,21 @@ class TipsView(View):
         await interaction.response.edit_message(embed=embed_hyper)
 
     @discord.ui.button(
+        custom_id="button_lora",
+        label="LoRA list")
+    async def button_lora(self, button, interaction):
+
+        lora_list = ''
+        for value in settings.global_var.lora_names:
+            if value == '':
+                value = ' '
+            lora_list += f'\n``{value}``'
+        embed_lora = discord.Embed(title="LoRA list", description=lora_list)
+        embed_lora.colour = settings.global_var.embed_color
+
+        await interaction.response.edit_message(embed=embed_lora)
+
+    @discord.ui.button(
         custom_id="button_embed",
         label="Embeddings list")
     async def button_embed(self, button, interaction):
@@ -125,9 +140,12 @@ class TipsView(View):
 
         url = 'https://github.com/Kilvoctu/aiyabot'
         url2 = 'https://raw.githubusercontent.com/Kilvoctu/kilvoctu.github.io/master/pics/previewthumb.png'
+        url3 = 'https://github.com/Kilvoctu/aiyabot/wiki#using-aiya'
         embed_about = discord.Embed(title="About me",
-                                    description=f"Hi! I'm an open-source Discord bot written in Python.\n"
-                                                f"[My home is here]({url}) if you'd like to check it out!")
+                                    description=f"Hi! I'm open-source Discord bot AIYA, written in Python.\n"
+                                                f"[My home is here]({url}) if you'd like to check it out, "
+                                                f"and the [wiki]({url3}) has some basic info on usage!\n\n"
+                                                f"Feel free to report bugs or leave feedback!")
         embed_about.colour = settings.global_var.embed_color
         embed_about.set_thumbnail(url=url2)
         embed_about.set_footer(text='Have a lovely day!', icon_url=url2)

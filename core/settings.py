@@ -9,23 +9,28 @@ from typing import Optional
 
 self = discord.Bot()
 dir_path = os.path.dirname(os.path.realpath(__file__))
-
 path = 'resources/'.format(dir_path)
 
+# the fallback defaults for AIYA if bot host doesn't set anything
 template = {
     "negative_prompt": "",
     "data_model": "",
-    "default_steps": 30,
+    "steps": 30,
     "max_steps": 50,
-    "default_width": 512,
-    "default_height": 512,
+    "width": 512,
+    "height": 512,
     "guidance_scale": "7.0",
     "sampler": "Euler a",
+    "style": "None",
+    "facefix": "None",
     "highres_fix": 'Disabled',
     "clip_skip": 1,
     "hypernet": "None",
-    "default_count": 1,
-    "max_count": 1
+    "lora": "None",
+    "strength": "0.75",
+    "count": 1,
+    "max_count": 1,
+    "upscaler_1": "ESRGAN_4x"
 }
 
 
@@ -42,7 +47,6 @@ class GlobalVar:
     api_auth = False
     api_user: Optional[str] = None
     api_pass: Optional[str] = None
-    send_model = False
     model_info = {}
     size_range = range(192, 1088, 64)
     sampler_names = []
@@ -51,6 +55,7 @@ class GlobalVar:
     embeddings_1 = []
     embeddings_2 = []
     hyper_names = []
+    lora_names = []
     upscaler_names = []
     hires_upscaler_names = []
 
@@ -71,24 +76,39 @@ def messages():
     return random_message
 
 
-def build(guild_id):
+def check(channel_id):
+    try:
+        read(str(channel_id))
+    except FileNotFoundError:
+        build(str(channel_id))
+        print(f'This is a new channel!? Creating default settings file for this channel ({channel_id}).')
+        # if models.csv has the blank "Default" data, update default settings
+        with open('resources/models.csv', 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f, delimiter='|')
+            for row in reader:
+                if row['display_name'] == 'Default' and row['model_full_name'] == '':
+                    update(str(channel_id), 'data_model', '')
+                    print('I see models.csv is on defaults. Updating model settings to default.')
+
+
+def build(channel_id):
     settings = json.dumps(template)
-    with open(path + guild_id + '.json', 'w') as configfile:
+    with open(path + channel_id + '.json', 'w') as configfile:
         configfile.write(settings)
 
 
-def read(guild_id):
-    with open(path + guild_id + '.json', 'r') as configfile:
+def read(channel_id):
+    with open(path + channel_id + '.json', 'r') as configfile:
         settings = dict(template)
         settings.update(json.load(configfile))
     return settings
 
 
-def update(guild_id: str, sett: str, value):
-    with open(path + guild_id + '.json', 'r') as configfile:
+def update(channel_id: str, sett: str, value):
+    with open(path + channel_id + '.json', 'r') as configfile:
         settings = json.load(configfile)
     settings[sett] = value
-    with open(path + guild_id + '.json', 'w') as configfile:
+    with open(path + channel_id + '.json', 'w') as configfile:
         json.dump(settings, configfile)
 
 
@@ -220,6 +240,7 @@ def populate_global_vars():
     r3 = s.get(global_var.url + "/sdapi/v1/face-restorers")
     r4 = s.get(global_var.url + "/sdapi/v1/embeddings")
     r5 = s.get(global_var.url + "/sdapi/v1/hypernetworks")
+    r6 = s.get(global_var.url + "/sdapi/v1/upscalers")
     r = s.get(global_var.url + "/sdapi/v1/sd-models")
     for s1 in r1.json():
         try:
@@ -250,6 +271,11 @@ def populate_global_vars():
             global_var.embeddings_2.append(s4)
     for s5 in r5.json():
         global_var.hyper_names.append(s5['name'])
+    for s6 in r6.json():
+        global_var.upscaler_names.append(s6['name'])
+    if 'SwinIR_4x' in global_var.upscaler_names:
+        template['upscaler_1'] = 'SwinIR_4x'
+
 
     # create nested dict for models based on display_name in models.csv
     # model_info[0] = display name (top level)
@@ -260,50 +286,30 @@ def populate_global_vars():
     with open('resources/models.csv', encoding='utf-8') as csv_file:
         model_data = list(csv.reader(csv_file, delimiter='|'))
         for row in model_data[1:]:
-            row_convert = row[1].replace('\\', '_').replace('/', '_')
             for model in r.json():
-                if row_convert == model['title'] or row_convert == model['model_name'] \
-                        or row[1] == model['title'] or row[1] == model['model_name']:
+                if row[1].split('\\')[-1] == model['filename'].split('\\')[-1] \
+                        or row[1].replace('\\', '_').replace('/', '_') == model['model_name']:
                     global_var.model_info[row[0]] = model['title'], model['model_name'], model['hash'], row[2]
                     break
+    # add "Default" if models.csv is on default, or if no model matches are found
+    if not global_var.model_info:
+        global_var.model_info[row[0]] = '', '', '', ''
 
-    # upscaler API does not pull info properly, so use the old way
+    # iterate through config for anything unobtainable from API
     config_url = s.get(global_var.url + "/config")
     old_config = config_url.json()
     try:
         for c in old_config['components']:
             try:
                 if c['props']:
-                    if c['props']['elem_id'] == 'extras_upscaler_1':
-                        global_var.upscaler_names = c['props']['choices']
+                    if c['props']['elem_id'] == 'setting_sd_lora':
+                        global_var.lora_names = c['props']['choices']
                     if c['props']['elem_id'] == 'txt2img_hr_upscaler':
                         global_var.hires_upscaler_names = c['props']['choices']
             except(Exception,):
                 pass
     except(Exception,):
-        print("Trouble accessing Web UI config! I can't pull the upscaler list")
-    global_var.hires_upscaler_names.append('Disabled')
-
-
-def guilds_check(self):
-    # guild settings files. has to be done after on_ready
-    for guild in self.guilds:
-        try:
-            read(str(guild.id))
-            print(f'I\'m using local settings for {guild.id} a.k.a {guild}.')
-            # if models.csv has the blank "Default" data, update guild settings
-            with open('resources/models.csv', 'r', encoding='utf-8') as f:
-                reader = csv.DictReader(f, delimiter='|')
-                for row in reader:
-                    if row['display_name'] == 'Default' and row['model_full_name'] == '':
-                        update(str(guild.id), 'data_model', '')
-                        print('I see models.csv is on defaults. Updating guild model settings to default.')
-        except FileNotFoundError:
-            build(str(guild.id))
-            print(f'Creating new settings file for {guild.id} a.k.a {guild}.')
-
-    if os.path.isfile('resources/None.json'):
-        pass
-    else:
-        print(f'Setting up settings for DMs, called None.json')
-        build("None")
+        print("Trouble accessing Web UI config! I can't pull the LoRAs or High-res upscaler lists!")
+    global_var.lora_names.remove('')
+    global_var.lora_names.insert(0, 'None')
+    global_var.hires_upscaler_names.insert(0, 'Disabled')
