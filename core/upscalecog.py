@@ -25,6 +25,9 @@ class UpscaleCog(commands.Cog):
         self.bot = bot
         self.file_name = ''
 
+    @commands.Cog.listener()
+    async def on_ready(self):
+        self.bot.add_view(viewhandler.DeleteView(self))
 
     @commands.slash_command(name='upscale', description='Upscale an image', guild_only=True)
     @option(
@@ -115,11 +118,6 @@ class UpscaleCog(commands.Cog):
                 await ctx.send_response('I need an image to upscale!', ephemeral=True)
                 has_image = False
 
-        # pull the name from the image
-        disassembled = urlparse(init_image.url)
-        filename, file_ext = splitext(basename(disassembled.path))
-        self.file_name = filename
-
         # formatting aiya initial reply
         reply_adds = ''
         if upscaler_2:
@@ -136,25 +134,19 @@ class UpscaleCog(commands.Cog):
 
         # set up tuple of parameters
         input_tuple = (ctx, resize, init_image, upscaler_1, upscaler_2, upscaler_2_strength, gfpgan, codeformer, upscale_first)
-        view = viewhandler.DeleteView(ctx.author.id)
+        view = viewhandler.DeleteView(input_tuple)
         # set up the queue if an image was found
+        user_queue_limit = settings.queue_check(ctx.author)
         if has_image:
             if queuehandler.GlobalQueue.dream_thread.is_alive():
-                user_already_in_queue = False
-                for queue_object in queuehandler.GlobalQueue.queue:
-                    if queue_object.ctx.author.id == ctx.author.id:
-                        user_already_in_queue = True
-                        break
-                if user_already_in_queue:
-                    await ctx.send_response(content=f'Please wait! You\'re queued up.', ephemeral=True)
+                if user_queue_limit == "Stop":
+                    await ctx.send_response(content=f"Please wait! You're past your queue limit of {settings.global_var.queue_limit}.", ephemeral=True)
                 else:
                     queuehandler.GlobalQueue.queue.append(queuehandler.UpscaleObject(self, *input_tuple, view))
-                    await ctx.send_response(
-                        f'<@{ctx.author.id}>, {settings.messages()}\nQueue: ``{len(queuehandler.GlobalQueue.queue)}`` - Scale: ``{resize}``x - Upscaler: ``{upscaler_1}``{reply_adds}')
             else:
                 await queuehandler.process_dream(self, queuehandler.UpscaleObject(self, *input_tuple, view))
-                await ctx.send_response(
-                    f'<@{ctx.author.id}>, {settings.messages()}\nQueue: ``{len(queuehandler.GlobalQueue.queue)}`` - Scale: ``{resize}``x - Upscaler: ``{upscaler_1}``{reply_adds}')
+            if user_queue_limit != "Stop":
+                await ctx.send_response(f'<@{ctx.author.id}>, {settings.messages()}\nQueue: ``{len(queuehandler.GlobalQueue.queue)}`` - Scale: ``{resize}``x - Upscaler: ``{upscaler_1}``{reply_adds}')
 
     # the function to queue Discord posts
     def post(self, event_loop: AbstractEventLoop, post_queue_object: queuehandler.PostObject):
@@ -172,9 +164,23 @@ class UpscaleCog(commands.Cog):
     def dream(self, event_loop: AbstractEventLoop, queue_object: queuehandler.UpscaleObject):
         try:
             start_time = time.time()
+            image_url = queue_object.init_image
 
+            if isinstance(image_url, str) and image_url.startswith('file://'):
+                # If image_url starts with file://, open the file locally and read its contents
+                disassembled = urlparse(image_url)
+                with open(image_url[7:], 'rb') as f:
+                    image = base64.b64encode(f.read()).decode('utf-8')
+            else:
+                # If image_url doesn't start with file://, use requests to get the image data
+                disassembled = urlparse(image_url.url)
+                image = base64.b64encode(requests.get(image_url.url, stream=True).content).decode('utf-8')
+
+            # pull the name from the image
+            filename, file_ext = splitext(basename(disassembled.path))
+            self.file_name = filename
+            
             # construct a payload
-            image = base64.b64encode(requests.get(queue_object.init_image.url, stream=True).content).decode('utf-8')
             payload = {
                 "upscaling_resize": queue_object.resize,
                 "upscaler_1": queue_object.upscaler_1,
@@ -191,20 +197,9 @@ class UpscaleCog(commands.Cog):
                 payload.update(up2_payload)
 
             # send normal payload to webui
-            with requests.Session() as s:
-                if settings.global_var.api_auth:
-                    s.auth = (settings.global_var.api_user, settings.global_var.api_pass)
+            s = settings.authenticate_user()
 
-                if settings.global_var.gradio_auth:
-                    login_payload = {
-                        'username': settings.global_var.username,
-                        'password': settings.global_var.password
-                    }
-                    s.post(settings.global_var.url + '/login', data=login_payload)
-                else:
-                    s.post(settings.global_var.url + '/login')
-
-                response = s.post(url=f'{settings.global_var.url}/sdapi/v1/extra-single-image', json=payload)
+            response = s.post(url=f'{settings.global_var.url}/sdapi/v1/extra-single-image', json=payload)
             response_data = response.json()
             end_time = time.time()
 
@@ -214,9 +209,10 @@ class UpscaleCog(commands.Cog):
 
             # save local copy of image
             image_data = response_data['image']
-            with open(file_path, "wb") as fh:
-                fh.write(base64.b64decode(image_data))
-            print(f'Saved image: {file_path}')
+            if settings.global_var.save_outputs == 'True':
+                with open(file_path, "wb") as fh:
+                    fh.write(base64.b64decode(image_data))
+                print(f'Saved image: {file_path}')
 
             # post to discord
             def post_dream():
@@ -226,13 +222,12 @@ class UpscaleCog(commands.Cog):
                     buffer.seek(0)
 
                     draw_time = '{0:.3f}'.format(end_time - start_time)
-                    message = f'my upscale of ``{queue_object.resize}``x took me ``{draw_time}`` ' \
-                              f'seconds!\n> *{queue_object.ctx.author.name}#{queue_object.ctx.author.discriminator}*'
-                    file = discord.File(fp=buffer, filename=file_path)
+                    message = f'my upscale of ``{queue_object.resize}``x took me ``{draw_time}`` seconds!'
+                    file = discord.File(fp=buffer, filename=f'{self.file_name[0:120]}-{queue_object.resize}.png')
 
                     queuehandler.process_post(
                         self, queuehandler.PostObject(
-                            self, queue_object.ctx, content=f'<@{queue_object.ctx.author.id}>, {message}', file=file, files='', embed='', view=queue_object.view))
+                            self, queue_object.ctx, content=f'<@{queue_object.ctx.author.id}>, {message}', file=file, embed='', view=queue_object.view))
             Thread(target=post_dream, daemon=True).start()
 
         except Exception as e:

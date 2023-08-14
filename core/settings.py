@@ -5,33 +5,84 @@ import os
 import random
 import requests
 import time
+import tomlkit
 from typing import Optional
+
+from core import queuehandler
 
 self = discord.Bot()
 dir_path = os.path.dirname(os.path.realpath(__file__))
 path = 'resources/'.format(dir_path)
+template = {}
 
-# the fallback defaults for AIYA if bot host doesn't set anything
-template = {
-    "negative_prompt": "",
-    "data_model": "",
-    "steps": 30,
-    "max_steps": 50,
-    "width": 512,
-    "height": 512,
-    "guidance_scale": "7.0",
-    "sampler": "Euler a",
-    "style": "None",
-    "facefix": "None",
-    "highres_fix": 'Disabled',
-    "clip_skip": 1,
-    "hypernet": "None",
-    "lora": "None",
-    "strength": "0.75",
-    "count": 1,
-    "max_count": 1,
-    "upscaler_1": "ESRGAN_4x"
-}
+# default config data
+default_config = """# This is the config file. It's advisable to restart if any changes are made.
+
+# The URL address to the AUTOMATIC1111 Web UI
+url = "http://127.0.0.1:7860"
+
+# Credentials when using --share and --gradio-auth
+user = ""
+pass = ""
+
+# Credentials when using --api-auth
+apiuser = ""
+apipass = ""
+
+# Whether or not to save outputs to disk ("True"/"False")
+save_outputs = "True"
+
+# The directory to save outputs (default = "outputs")
+dir = "outputs"
+
+# The limit of tasks a user can have waiting in queue (at least 1)
+queue_limit = 1
+
+# Whether or not buttons keep generating in batches ("True"/"False")
+batch_buttons = "False"
+
+# Whether or not buttons are restricted to user who requested image ("True"/"False")
+restrict_buttons = "True"
+
+# The maximum value allowed for width/height (keep as multiple of 64)
+max_size = 1024
+
+# The resize amount when using context menu Quick Upscale
+quick_upscale_resize = 2.0
+
+# AIYA won't generate if prompt has any words in the ban list
+# Separate with commas; example, ["a", "b", "c"]
+prompt_ban_list = []
+# These words will be automatically removed from the prompt
+prompt_ignore_list = []
+# Choose whether or not ignored words are displayed to user
+display_ignored_words = "False"
+# These words will be added to the beginning of the negative prompt
+negative_prompt_prefix = []
+
+
+# the fallback channel defaults template for AIYA if nothing is set
+negative_prompt = ""
+data_model = ""
+steps = 30
+max_steps = 50
+width = 512
+height = 512
+guidance_scale = "7.0"
+sampler = "Euler a"
+style = "None"
+facefix = "None"
+highres_fix = "Disabled"
+clip_skip = 1
+hypernet = "None"
+hyper_multi = "0.85"
+lora = "None"
+lora_multi = "0.85"
+strength = "0.75"
+batch = "1,1"
+max_batch = "1,1"
+upscaler_1 = "ESRGAN_4x"
+"""
 
 
 # initialize global variables here
@@ -41,7 +92,7 @@ class GlobalVar:
     wait_message = []
     wait_message_count = 0
     embed_color = discord.Colour.from_rgb(222, 89, 28)
-    gradio_auth = False
+    gradio_auth = None
     username: Optional[str] = None
     password: Optional[str] = None
     api_auth = False
@@ -49,6 +100,7 @@ class GlobalVar:
     api_pass: Optional[str] = None
     model_info = {}
     size_range = range(192, 1088, 64)
+    size_range_exceed = None
     sampler_names = []
     style_names = {}
     facefix_models = []
@@ -56,19 +108,122 @@ class GlobalVar:
     embeddings_2 = []
     hyper_names = []
     lora_names = []
+    extra_nets = []
     upscaler_names = []
     hires_upscaler_names = []
+    save_outputs = "True"
+    queue_limit = 1
+    batch_buttons = "False"
+    restrict_buttons = "True"
+    quick_upscale_resize = 2.0
+    prompt_ban_list = []
+    prompt_ignore_list = []
+    display_ignored_words = "False"
+    negative_prompt_prefix = []
 
 
 global_var = GlobalVar()
 
 
+def batch_format(batch_string):
+    format_batch_string = batch_string.replace(".", ",").split(",")
+    values_given = len(format_batch_string)
+    if values_given < 2:
+        format_batch_string.append('1')
+    # try to ensure each value is an integer of at least 1
+    try:
+        count = int(format_batch_string[0])
+        if count < 1:
+            count = 1
+    except(Exception,):
+        count = 1
+    try:
+        size = int(format_batch_string[1])
+        if size < 1:
+            size = 1
+    except(Exception,):
+        size = 1
+    return count, size, values_given
+
+
+def prompt_mod(prompt, negative_prompt):
+    clean_negative_prompt = negative_prompt
+    # if any banned words are in prompt, return immediately
+    if global_var.prompt_ban_list:
+        for x in global_var.prompt_ban_list:
+            x = str(x.lower())
+            if x in prompt.lower():
+                return "Stop", x
+    # otherwise mod the prompt/negative prompt
+    if global_var.prompt_ignore_list or global_var.negative_prompt_prefix:
+        for y in global_var.prompt_ignore_list:
+            y = str(y.lower())
+            if y in prompt.lower():
+                prompt = prompt.replace(y, "")
+        prompt = ' '.join(prompt.split())
+        if prompt == '':
+            prompt = ' '
+        for z in global_var.negative_prompt_prefix:
+            z = str(z.lower())
+            if z in negative_prompt.lower():
+                clean_negative_prompt = clean_negative_prompt.replace(z, "")
+            else:
+                negative_prompt = f"{z} {negative_prompt}"
+        return "Mod", prompt, negative_prompt.strip(), clean_negative_prompt.strip()
+    return "None"
+
+
+def extra_net_check(prompt, extra_net, net_multi):
+    # grab extra net multiplier if there is one
+    if ':' in extra_net:
+        net_multi = extra_net.split(':', 1)[1]
+        extra_net = extra_net.split(':', 1)[0]
+        try:
+            net_multi = net_multi.replace(",", ".")
+            float(net_multi)
+        except(Exception,):
+            # set default if invalid net multiplier is given
+            net_multi = 0.85
+    # figure out what extra_net was used
+    if extra_net is not None and extra_net != 'None':
+        for network in global_var.hyper_names:
+            if extra_net == network:
+                prompt += f' <hypernet:{extra_net}:{str(net_multi)}>'
+        for network in global_var.lora_names:
+            if extra_net == network:
+                prompt += f' <lora:{extra_net}:{str(net_multi)}>'
+    return prompt, extra_net, net_multi
+
+
+def extra_net_defaults(prompt, channel):
+    check(channel)
+    hypernet = read(channel)['hypernet']
+    hyper_multi = read(channel)['hyper_multi']
+    lora = read(channel)['lora']
+    lora_multi = read(channel)['lora_multi']
+    # append channel default hypernet or lora to the prompt
+    if hypernet != 'None' and hypernet not in prompt:
+        prompt += f' <hypernet:{hypernet}:{hyper_multi}>'
+    if lora != 'None' and lora not in prompt:
+        prompt += f' <lora:{lora}:{lora_multi}>'
+    return prompt
+
+
+def queue_check(author_compare):
+    user_queue = 0
+    for queue_object in queuehandler.GlobalQueue.queue:
+        if queue_object.ctx.author.id == author_compare.id:
+            user_queue += 1
+            if user_queue >= global_var.queue_limit:
+                return "Stop"
+
+
 def stats_count(number):
-    with open('resources/stats.txt', 'r') as f:
-        data = list(map(int, f.readlines()))
+    with open(f'{path}stats.txt', 'r') as f:
+        data = list(map(float, f.readlines()))
     data[0] += number
-    with open('resources/stats.txt', 'w') as f:
-        f.write('\n'.join(str(x) for x in data))
+    with open(f'{path}stats.txt', 'w') as f:
+        f.write('\n'.join(str(int(x)) for x in data))
 
 
 def messages():
@@ -83,7 +238,7 @@ def check(channel_id):
         build(str(channel_id))
         print(f'This is a new channel!? Creating default settings file for this channel ({channel_id}).')
         # if models.csv has the blank "Default" data, update default settings
-        with open('resources/models.csv', 'r', encoding='utf-8') as f:
+        with open(f'{path}models.csv', 'r', encoding='utf-8') as f:
             reader = csv.DictReader(f, delimiter='|')
             for row in reader:
                 if row['display_name'] == 'Default' and row['model_full_name'] == '':
@@ -91,8 +246,41 @@ def check(channel_id):
                     print('I see models.csv is on defaults. Updating model settings to default.')
 
 
+def config_auth(config):
+    global_var.url = config['url']
+    global_var.dir = config['dir']
+    global_var.username = config['user']
+    global_var.password = config['pass']
+    global_var.api_user = config['apiuser']
+    global_var.api_pass = config['apipass']
+
+
+def generate_template(template_pop, config):
+    template_pop['negative_prompt'] = config['negative_prompt']
+    template_pop['data_model'] = config['data_model']
+    template_pop['steps'] = config['steps']
+    template_pop['max_steps'] = config['max_steps']
+    template_pop['width'] = config['width']
+    template_pop['height'] = config['height']
+    template_pop['guidance_scale'] = config['guidance_scale']
+    template_pop['sampler'] = config['sampler']
+    template_pop['style'] = config['style']
+    template_pop['facefix'] = config['facefix']
+    template_pop['highres_fix'] = config['highres_fix']
+    template_pop['clip_skip'] = config['clip_skip']
+    template_pop['hypernet'] = config['hypernet']
+    template_pop['hyper_multi'] = config['hyper_multi']
+    template_pop['lora'] = config['lora']
+    template_pop['lora_multi'] = config['lora_multi']
+    template_pop['strength'] = config['strength']
+    template_pop['batch'] = config['batch']
+    template_pop['max_batch'] = config['max_batch']
+    template_pop['upscaler_1'] = config['upscaler_1']
+    return template_pop
+
+
 def build(channel_id):
-    settings = json.dumps(template)
+    settings = json.dumps(template, indent=1)
     with open(path + channel_id + '.json', 'w') as configfile:
         configfile.write(settings)
 
@@ -101,6 +289,17 @@ def read(channel_id):
     with open(path + channel_id + '.json', 'r') as configfile:
         settings = dict(template)
         settings.update(json.load(configfile))
+
+        # update deprecated 'count' to 'batch'
+        if 'count' in settings or 'max_count' in settings:
+            try:
+                settings['batch'] = str(settings.pop('count'))
+                settings['max_batch'] = str(settings.pop('max_count'))
+            except(Exception,):
+                pass
+            with open(path + channel_id + '.json', 'w') as configfile2:
+                json.dump(settings, configfile2, indent=1)
+
     return settings
 
 
@@ -109,7 +308,31 @@ def update(channel_id: str, sett: str, value):
         settings = json.load(configfile)
     settings[sett] = value
     with open(path + channel_id + '.json', 'w') as configfile:
-        json.dump(settings, configfile)
+        json.dump(settings, configfile, indent=1)
+
+
+def authenticate_user():
+    s = requests.Session()
+    if global_var.api_auth:
+        s.auth = (global_var.api_user, global_var.api_pass)
+
+    # do a check to see if --gradio-auth is set
+    if global_var.gradio_auth is None:
+        r = s.get(global_var.url + '/sdapi/v1/cmd-flags')
+        if r.status_code == 401:
+            global_var.gradio_auth = True
+        else:
+            global_var.gradio_auth = False
+
+    if global_var.gradio_auth:
+        login_payload = {
+            'username': global_var.username,
+            'password': global_var.password
+        }
+        s.post(global_var.url + '/login', data=login_payload)
+    else:
+        s.post(global_var.url + '/login')
+    return s
 
 
 def get_env_var_with_default(var: str, default: str) -> str:
@@ -118,17 +341,55 @@ def get_env_var_with_default(var: str, default: str) -> str:
 
 
 def startup_check():
-    # check .env for parameters. if they don't exist, ignore it and go with defaults.
-    global_var.url = get_env_var_with_default('URL', 'http://127.0.0.1:7860').rstrip("/")
+    config_exists = True
+    if os.path.isfile(f'{path}config.toml'):
+        pass
+    else:
+        print(f"Configuration file missing! I'm creating config.toml in {path}.")
+        config_exists = False
+        with open(f'{path}config.toml', "w") as toml_file:
+            toml_file.write(tomlkit.dumps(tomlkit.loads(default_config)))
+
+    with open(f'{path}config.toml', 'r') as fileObj:
+        content = fileObj.read()
+        config = tomlkit.loads(content)
+
+    # update the config if any new keys were added
+    if not tomlkit.loads(default_config).keys() == config.keys():
+        print('Configuration file keys mismatch! Updating the file.')
+        temp_config = {}
+        for k, v in config.items():
+            temp_config[k] = v
+
+        with open(f'{path}config.toml', "w") as toml_file:
+            toml_file.write(tomlkit.dumps(tomlkit.loads(default_config)))
+        with open(f'{path}config.toml', 'r') as fileObj:
+            content = fileObj.read()
+            config = tomlkit.loads(content)
+        for key, value in config.items():
+            for k, v in temp_config.items():
+                if k == key and value != v:
+                    config[key] = v
+                    f = open(f'{path}config.toml', 'w')
+                    tomlkit.dump(config, f)
+                    f.close()
+
+    # port any settings that were set in .env file to the config
+    if not config_exists:
+        config['url'] = get_env_var_with_default('URL', 'http://127.0.0.1:7860').rstrip("/")
+        config['dir'] = get_env_var_with_default('DIR', 'outputs')
+        config['user'] = get_env_var_with_default("USER", "")
+        config['pass'] = get_env_var_with_default("PASS", "")
+        config['apiuser'] = get_env_var_with_default("APIUSER", "")
+        config['apipass'] = get_env_var_with_default("APIPASS", "")
+        f = open(f'{path}config.toml', 'w')
+        tomlkit.dump(config, f)
+        f.close()
+
+    config_auth(config)
+    generate_template(template, config)
     print(f'Using URL: {global_var.url}')
-
-    global_var.dir = get_env_var_with_default('DIR', 'outputs')
     print(f'Using outputs directory: {global_var.dir}')
-
-    global_var.username = os.getenv("USER")
-    global_var.password = os.getenv("PASS")
-    global_var.api_user = os.getenv("APIUSER")
-    global_var.api_pass = os.getenv("APIPASS")
 
     # check if Web UI is running
     connected = False
@@ -155,18 +416,18 @@ def startup_check():
 
 def files_check():
     # load random messages for aiya to say
-    with open('resources/messages.csv') as csv_file:
+    with open(f'{path}messages.csv', encoding='UTF-8') as csv_file:
         message_data = list(csv.reader(csv_file, delimiter='|'))
         for row in message_data:
             global_var.wait_message.append(row[0])
     global_var.wait_message_count = len(global_var.wait_message) - 1
 
     # creating files if they don't exist
-    if os.path.isfile('resources/stats.txt'):
+    if os.path.isfile(f'{path}stats.txt'):
         pass
     else:
         print(f'Uh oh, stats.txt missing. Creating a new one.')
-        with open('resources/stats.txt', 'w') as f:
+        with open(f'{path}stats.txt', 'w') as f:
             f.write('0')
 
     header = ['display_name', 'model_full_name', 'activator_token']
@@ -174,16 +435,16 @@ def files_check():
     make_model_file = True
     replace_model_file = False
     # if models.csv exists and has data
-    if os.path.isfile('resources/models.csv'):
-        with open('resources/models.csv', encoding='utf-8') as f:
+    if os.path.isfile(f'{path}models.csv'):
+        with open(f'{path}models.csv', encoding='utf-8') as f:
             reader = csv.reader(f, delimiter="|")
             for i, row in enumerate(reader):
                 # if header is missing columns, reformat the file
                 if i == 0:
                     if len(row) < 3:
-                        with open('resources/models.csv', 'r') as fp:
+                        with open(f'{path}models.csv', 'r') as fp:
                             reader = csv.DictReader(fp, fieldnames=header, delimiter="|")
-                            with open('resources/models2.csv', 'w', newline='') as fh:
+                            with open(f'{path}models2.csv', 'w', newline='') as fh:
                                 writer = csv.DictWriter(fh, fieldnames=reader.fieldnames, delimiter="|")
                                 writer.writeheader()
                                 header = next(reader)
@@ -193,12 +454,12 @@ def files_check():
                 if i == 1:
                     make_model_file = False
         if replace_model_file:
-            os.remove('resources/models.csv')
-            os.rename('resources/models2.csv', 'resources/models.csv')
+            os.remove(f'{path}models.csv')
+            os.rename(f'{path}models2.csv', f'{path}models.csv')
     # create/reformat model.csv if something is wrong
     if make_model_file:
         print(f'Uh oh, missing models.csv data. Creating a new one.')
-        with open('resources/models.csv', 'w', newline='', encoding='utf-8') as f:
+        with open(f'{path}models.csv', 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f, delimiter="|")
             writer.writerow(header)
             writer.writerow(unset_model)
@@ -213,26 +474,32 @@ def files_check():
 
 
 def populate_global_vars():
-    # pull list of samplers, styles and face restorers from api
+    # update global vars with stuff from config
+    with open(f'{path}config.toml', 'r') as fileObj:
+        content = fileObj.read()
+        config = tomlkit.loads(content)
+
+    # update these again in case changes were made
+    config_auth(config)
+    generate_template(template, config)
+
+    global_var.save_outputs = config['save_outputs']
+    global_var.queue_limit = config['queue_limit']
+    global_var.batch_buttons = config['batch_buttons']
+    global_var.restrict_buttons = config['restrict_buttons']
+    global_var.quick_upscale_resize = config['quick_upscale_resize']
+    global_var.prompt_ban_list = [x for x in config['prompt_ban_list']]
+    global_var.prompt_ignore_list = [x for x in config['prompt_ignore_list']]
+    global_var.display_ignored_words = config['display_ignored_words']
+    global_var.negative_prompt_prefix = [x for x in config['negative_prompt_prefix']]
+    # slash command doesn't update this dynamically. Changes to size need a restart.
+    global_var.size_range = range(192, config['max_size'] + 64, 64)
+    if len(global_var.size_range) > 25:
+        global_var.size_range_exceed = [x for x in global_var.size_range]
+        global_var.size_range = []
+
     # create persistent session since we'll need to do a few API calls
-    s = requests.Session()
-    if global_var.api_auth:
-        s.auth = (global_var.api_user, global_var.api_pass)
-
-    # do a check to see if --gradio-auth is set
-    r0 = s.get(global_var.url + '/sdapi/v1/cmd-flags')
-    response_data = r0.json()
-    if response_data['gradio_auth']:
-        global_var.gradio_auth = True
-
-    if global_var.gradio_auth:
-        login_payload = {
-            'username': global_var.username,
-            'password': global_var.password
-        }
-        s.post(global_var.url + '/login', data=login_payload)
-    else:
-        s.post(global_var.url + '/login')
+    s = authenticate_user()
 
     # load many values from Web UI into global variables
     r1 = s.get(global_var.url + "/sdapi/v1/samplers")
@@ -250,13 +517,9 @@ def populate_global_vars():
             print("Can't connect to API for some reason!"
                   "Please check your .env URL or credentials.")
             os.system("pause")
-
-    # add default "None" options
     global_var.style_names['None'] = ''
-    global_var.hyper_names.append('None')
-    # populate remaining options
     for s2 in r2.json():
-        global_var.style_names[s2['name']] = s2['prompt']
+        global_var.style_names[s2['name']] = s2['prompt'], s2['negative_prompt']
     for s3 in r3.json():
         global_var.facefix_models.append(s3['name'])
     for s4, shape in r4.json()['loaded'].items():
@@ -276,19 +539,20 @@ def populate_global_vars():
     if 'SwinIR_4x' in global_var.upscaler_names:
         template['upscaler_1'] = 'SwinIR_4x'
 
-
     # create nested dict for models based on display_name in models.csv
     # model_info[0] = display name (top level)
     # model_info[1][0] = "title". this is sent to the API
     # model_info[1][1] = name of the model
     # model_info[1][2] = shorthash
     # model_info[1][3] = activator token
-    with open('resources/models.csv', encoding='utf-8') as csv_file:
+    with open(f'{path}models.csv', encoding='utf-8') as csv_file:
         model_data = list(csv.reader(csv_file, delimiter='|'))
         for row in model_data[1:]:
             for model in r.json():
-                if row[1].split('\\')[-1] == model['filename'].split('\\')[-1] \
-                        or row[1].replace('\\', '_').replace('/', '_') == model['model_name']:
+                norm_csv_path = os.path.normpath(row[1])
+                norm_api_path = os.path.normpath(model['filename'])
+                if norm_csv_path.split(os.sep)[-1] == norm_api_path.split(os.sep)[-1] \
+                        or norm_csv_path.replace(os.sep, '_') == model['model_name']:
                     global_var.model_info[row[0]] = model['title'], model['model_name'], model['hash'], row[2]
                     break
     # add "Default" if models.csv is on default, or if no model matches are found
@@ -310,6 +574,13 @@ def populate_global_vars():
                 pass
     except(Exception,):
         print("Trouble accessing Web UI config! I can't pull the LoRAs or High-res upscaler lists!")
-    global_var.lora_names.remove('')
+    # format some global lists, ensure default "None" options exist
+    if 'None' not in global_var.facefix_models:
+        global_var.facefix_models.insert(0, 'None')
+    if 'None' not in global_var.hyper_names:
+        global_var.hyper_names.insert(0, 'None')
+    if '' in global_var.lora_names:
+        global_var.lora_names.remove('')
+    global_var.extra_nets = global_var.hyper_names + global_var.lora_names
     global_var.lora_names.insert(0, 'None')
     global_var.hires_upscaler_names.insert(0, 'Disabled')

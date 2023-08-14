@@ -7,6 +7,8 @@ outputs/*.png
 resources/models.csv
 resources/stats.txt
 resources/*.json
+resources/*.toml
 
 .env
 start.bat
+core/MagicPrompt-SD/*

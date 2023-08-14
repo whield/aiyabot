@@ -34,6 +34,11 @@ class SettingsCog(commands.Cog):
             lora for lora in settings.global_var.lora_names
         ]
 
+    def extra_net_autocomplete(self: discord.AutocompleteContext):
+        return [
+            network for network in settings.global_var.extra_nets
+        ]
+
     def upscaler_autocomplete(self: discord.AutocompleteContext):
         return [
             upscaler for upscaler in settings.global_var.upscaler_names
@@ -43,6 +48,17 @@ class SettingsCog(commands.Cog):
         return [
             hires for hires in settings.global_var.hires_upscaler_names
         ]
+
+    # do autocomplete here to handle when max_size exceeds discord limits
+    def size_autocomplete(self: discord.AutocompleteContext):
+        return [
+            size for size in settings.global_var.size_range_exceed
+        ]
+
+    if len(settings.global_var.size_range) == 0:
+        size_auto = discord.utils.basic_autocomplete(size_autocomplete)
+    else:
+        size_auto = None
 
     @commands.slash_command(name='settings', description='Review and change channel defaults', guild_only=True)
     @option(
@@ -54,7 +70,7 @@ class SettingsCog(commands.Cog):
     @option(
         'n_prompt',
         str,
-        description='Set default negative prompt for the channel',
+        description='Set default negative prompt for the channel (put "reset" to return to empty prompt)',
         required=False,
     )
     @option(
@@ -83,14 +99,16 @@ class SettingsCog(commands.Cog):
         int,
         description='Set default width for the channel',
         required=False,
-        choices=[x for x in range(192, 1088, 64)]
+        autocomplete=size_auto,
+        choices=settings.global_var.size_range
     )
     @option(
         'height',
         int,
         description='Set default height for the channel',
         required=False,
-        choices=[x for x in range(192, 1088, 64)]
+        autocomplete=size_auto,
+        choices=settings.global_var.size_range
     )
     @option(
         'guidance_scale',
@@ -106,11 +124,25 @@ class SettingsCog(commands.Cog):
         choices=settings.global_var.sampler_names,
     )
     @option(
-        'style',
+        'styles',
         str,
         description='Apply a predefined style to the generation.',
         required=False,
         autocomplete=discord.utils.basic_autocomplete(style_autocomplete),
+    )
+    @option(
+        'hypernet',
+        str,
+        description='Set default hypernetwork model for the channel',
+        required=False,
+        autocomplete=discord.utils.basic_autocomplete(hyper_autocomplete),
+    )
+    @option(
+        'lora',
+        str,
+        description='Set default LoRA for the channel',
+        required=False,
+        autocomplete=discord.utils.basic_autocomplete(lora_autocomplete),
     )
     @option(
         'facefix',
@@ -134,36 +166,20 @@ class SettingsCog(commands.Cog):
         choices=[x for x in range(1, 13, 1)]
     )
     @option(
-        'hypernet',
-        str,
-        description='Set default hypernetwork model for the channel',
-        required=False,
-        autocomplete=discord.utils.basic_autocomplete(hyper_autocomplete),
-    )
-    @option(
-        'lora',
-        str,
-        description='Set default LoRA for the channel',
-        required=False,
-        autocomplete=discord.utils.basic_autocomplete(lora_autocomplete),
-    )
-    @option(
         'strength',
         str,
         description='Set default strength (for init_img) for the channel (0.0 to 1.0).'
     )
     @option(
-        'count',
-        int,
-        description='Set default count for the channel',
-        min_value=1,
+        'batch',
+        str,
+        description='Set default batch for the channel (count,size)',
         required=False,
     )
     @option(
-        'max_count',
-        int,
-        description='Set maximum count for the channel',
-        min_value=1,
+        'max_batch',
+        str,
+        description='Set maximum batch for the channel (count,size)',
         required=False,
     )
     @option(
@@ -188,15 +204,15 @@ class SettingsCog(commands.Cog):
                                width: Optional[int] = None, height: Optional[int] = None,
                                guidance_scale: Optional[str] = None,
                                sampler: Optional[str] = None,
-                               style: Optional[str] = None,
+                               styles: Optional[str] = None,
+                               hypernet: Optional[str] = None,
+                               lora: Optional[str] = None,
                                facefix: Optional[str] = None,
                                highres_fix: Optional[str] = None,
                                clip_skip: Optional[int] = None,
-                               hypernet: Optional[str] = None,
-                               lora: Optional[str] = None,
                                strength: Optional[str] = None,
-                               count: Optional[int] = None,
-                               max_count: Optional[int] = None,
+                               batch: Optional[str] = None,
+                               max_batch: Optional[str] = None,
                                upscaler_1: Optional[str] = None,
                                refresh: Optional[bool] = False):
         # get the channel id and check if a settings file exists
@@ -204,19 +220,30 @@ class SettingsCog(commands.Cog):
         settings.check(channel)
         reviewer = settings.read(channel)
         # create the embed for the reply
-        embed = discord.Embed(title="Summary", description="")
+        embed = discord.Embed(title="Channel Defaults Summary", description="")
         embed.set_footer(text=f'Channel id: {channel}')
         embed.colour = settings.global_var.embed_color
-        current, new = '', ''
+        current, new, new_n_prompt = '', '', ''
+        dummy_prompt, lora_multi, hyper_multi = '', 0.85, 0.85
         set_new = False
 
         if current_settings:
             cur_set = settings.read(channel)
             for key, value in cur_set.items():
-                if value == '':
-                    value = ' '
-                current += f'\n{key} - ``{value}``'
-            embed.add_field(name=f'Current channel defaults', value=current, inline=False)
+                if key == 'negative_prompt':
+                    pass
+                else:
+                    if value == '':
+                        value = ' '
+                    current += f'\n{key} - ``{value}``'
+            embed.add_field(name=f'Current parameters', value=current, inline=True)
+            # put negative prompt on new field for hosts who like massive negative prompts
+            cur_n_prompt = f'{cur_set["negative_prompt"]}'
+            if cur_n_prompt == '':
+                cur_n_prompt = ' '
+            elif len(cur_n_prompt) > 1024:
+                cur_n_prompt = f'{cur_n_prompt[:1010]}....'
+            embed.add_field(name=f'Current negative prompt', value=f'``{cur_n_prompt}``', inline=True)
 
         # run function to update global variables
         if refresh:
@@ -234,9 +261,13 @@ class SettingsCog(commands.Cog):
 
         # run through each command and update the defaults user selects
         if n_prompt is not None:
+            new_n_prompt = f'{n_prompt}'
+            if n_prompt == 'reset':
+                n_prompt = ''
+                new_n_prompt = ' '
+            elif len(new_n_prompt) > 1024:
+                new_n_prompt = f'{new_n_prompt[:1010]}....'
             settings.update(channel, 'negative_prompt', n_prompt)
-            new += f'\nNegative prompts: ``"{n_prompt}"``'
-            set_new = True
 
         if data_model is not None:
             settings.update(channel, 'data_model', data_model)
@@ -277,9 +308,9 @@ class SettingsCog(commands.Cog):
             new += f'\nSampler: ``"{sampler}"``'
             set_new = True
 
-        if style is not None:
-            settings.update(channel, 'style', style)
-            new += f'\nStyle: ``"{style}"``'
+        if styles is not None:
+            settings.update(channel, 'style', styles)
+            new += f'\nStyle: ``"{styles}"``'
             set_new = True
 
         if facefix is not None:
@@ -298,13 +329,23 @@ class SettingsCog(commands.Cog):
             set_new = True
 
         if hypernet is not None:
+            message = ''
+            if ':' in hypernet:
+                dummy_prompt, hypernet, hyper_multi = settings.extra_net_check(dummy_prompt, hypernet, hyper_multi)
+                settings.update(channel, 'hypernet_multi', hyper_multi)
+                message = f' (multiplier: ``{hyper_multi}``)'
             settings.update(channel, 'hypernet', hypernet)
-            new += f'\nHypernet: ``"{hypernet}"``'
+            new += f'\nHypernet: ``"{hypernet}"``{message}'
             set_new = True
 
         if lora is not None:
+            message = ''
+            if ':' in lora:
+                dummy_prompt, lora, lora_multi = settings.extra_net_check(dummy_prompt, lora, lora_multi)
+                settings.update(channel, 'lora_multi', lora_multi)
+                message = f' (multiplier: ``{lora_multi}``)'
             settings.update(channel, 'lora', lora)
-            new += f'\nLoRA: ``"{lora}"``'
+            new += f'\nLoRA: ``"{lora}"``{message}'
             set_new = True
 
         if strength is not None:
@@ -317,13 +358,22 @@ class SettingsCog(commands.Cog):
             new += f'\nUpscaler 1: ``"{upscaler_1}"``'
             set_new = True
 
-        if max_count is not None:
-            settings.update(channel, 'max_count', max_count)
-            new += f'\nMax count: ``{max_count}``'
-            # automatically lower default count if max count goes below it
-            if max_count < reviewer['count']:
-                settings.update(channel, 'count', max_count)
-                new += f'\nDefault count is too high! Lowering to ``{max_count}``.'
+        if max_batch is not None:
+            batch_check = settings.batch_format(reviewer['batch'])
+            max_batch = settings.batch_format(max_batch)
+
+            settings.update(channel, 'max_batch', f'{max_batch[0]},{max_batch[1]}')
+            new += f'\nMax batch (count,size): ``{max_batch[0]},{max_batch[1]}``'
+            # automatically lower default batch if max batch goes below it
+            if max_batch[0] < batch_check[0]:
+                settings.update(channel, 'batch', f'{max_batch[0]},{batch_check[1]}')
+                new += f'\nDefault batch count is too high! Lowering to ``{max_batch[0]}``.'
+            if max_batch[1] < batch_check[1]:
+                if max_batch[0] < batch_check[0]:
+                    settings.update(channel, 'batch', f'{max_batch[0]},{max_batch[1]}')
+                else:
+                    settings.update(channel, 'batch', f'{batch_check[0]},{max_batch[1]}')
+                new += f'\nDefault batch size is too high! Lowering to ``{max_batch[1]}``.'
             set_new = True
 
         # review settings again in case user is trying to set steps/counts and max steps/counts simultaneously
@@ -336,16 +386,23 @@ class SettingsCog(commands.Cog):
                 new += f'\nSteps: ``{steps}``'
             set_new = True
 
-        if count is not None:
-            if count > reviewer['max_count']:
-                new += f"\nMax count is ``{reviewer['max_count']}``! You can't go beyond it!"
+        if batch is not None:
+            batch = settings.batch_format(batch)
+            max_batch_check = settings.batch_format(reviewer['max_batch'])
+
+            if batch[0] > max_batch_check[0]:
+                new += f"\nMax batch count is ``{max_batch_check[0]}``! You can't go beyond it!"
+            elif batch[1] > max_batch_check[1]:
+                new += f"\nMax batch size is ``{max_batch_check[1]}``! You can't go beyond it!"
             else:
-                settings.update(channel, 'count', count)
-                new += f'\nCount: ``{count}``'
+                settings.update(channel, 'batch', f'{batch[0]},{batch[1]}')
+                new += f'\nbatch (count,size): ``{batch[0]},{batch[1]}``'
             set_new = True
 
         if set_new:
             embed.add_field(name=f'New defaults', value=new, inline=False)
+        if new_n_prompt:
+            embed.add_field(name=f'New default negative prompt', value=f'``{new_n_prompt}``', inline=False)
 
         await ctx.send_response(embed=embed, ephemeral=True)
 

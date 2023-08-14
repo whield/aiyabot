@@ -1,16 +1,14 @@
 import base64
-import contextlib
 import discord
 import io
+import math
 import random
 import requests
 import time
 import traceback
-from asyncio import AbstractEventLoop
 from PIL import Image, PngImagePlugin
 from discord import option
 from discord.ext import commands
-from threading import Thread
 from typing import Optional
 
 from core import queuehandler
@@ -24,6 +22,11 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
 
     def __init__(self, bot):
         self.bot = bot
+
+    if len(settings.global_var.size_range) == 0:
+        size_auto = discord.utils.basic_autocomplete(settingscog.SettingsCog.size_autocomplete)
+    else:
+        size_auto = None
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -61,14 +64,16 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
         int,
         description='Width of the generated image.',
         required=False,
-        choices=[x for x in settings.global_var.size_range]
+        autocomplete=size_auto,
+        choices=settings.global_var.size_range
     )
     @option(
         'height',
         int,
         description='Height of the generated image.',
         required=False,
-        choices=[x for x in settings.global_var.size_range]
+        autocomplete=size_auto,
+        choices=settings.global_var.size_range
     )
     @option(
         'guidance_scale',
@@ -90,11 +95,18 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
         required=False,
     )
     @option(
-        'style',
+        'styles',
         str,
         description='Apply a predefined style to the generation.',
         required=False,
         autocomplete=discord.utils.basic_autocomplete(settingscog.SettingsCog.style_autocomplete),
+    )
+    @option(
+        'extra_net',
+        str,
+        description='Apply an extra network to influence the output. To set multiplier, add :# (# = 0.0 - 1.0)',
+        required=False,
+        autocomplete=discord.utils.basic_autocomplete(settingscog.SettingsCog.extra_net_autocomplete),
     )
     @option(
         'facefix',
@@ -118,20 +130,6 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
         choices=[x for x in range(1, 13, 1)]
     )
     @option(
-        'hypernet',
-        str,
-        description='Apply a hypernetwork model to influence the output.',
-        required=False,
-        autocomplete=discord.utils.basic_autocomplete(settingscog.SettingsCog.hyper_autocomplete),
-    )
-    @option(
-        'lora',
-        str,
-        description='Apply a LoRA model to influence the output.',
-        required=False,
-        autocomplete=discord.utils.basic_autocomplete(settingscog.SettingsCog.lora_autocomplete),
-    )
-    @option(
         'strength',
         str,
         description='The amount in which init_image will be altered (0.0 to 1.0).'
@@ -149,9 +147,9 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
         required=False,
     )
     @option(
-        'count',
-        int,
-        description='The number of images to generate. This is "Batch count", not "Batch size".',
+        'batch',
+        str,
+        description='The number of images to generate. Batch format: count,size',
         required=False,
     )
     async def dream_handler(self, ctx: discord.ApplicationContext, *,
@@ -162,16 +160,15 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
                             guidance_scale: Optional[str] = None,
                             sampler: Optional[str] = None,
                             seed: Optional[int] = -1,
-                            style: Optional[str] = None,
+                            styles: Optional[str] = None,
+                            extra_net: Optional[str] = None,
                             facefix: Optional[str] = None,
                             highres_fix: Optional[str] = None,
                             clip_skip: Optional[int] = None,
-                            hypernet: Optional[str] = None,
-                            lora: Optional[str] = None,
                             strength: Optional[str] = None,
                             init_image: Optional[discord.Attachment] = None,
                             init_url: Optional[str],
-                            count: Optional[int] = None):
+                            batch: Optional[str] = None):
 
         # update defaults with any new defaults from settingscog
         channel = '% s' % ctx.channel.id
@@ -188,22 +185,18 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
             guidance_scale = settings.read(channel)['guidance_scale']
         if sampler is None:
             sampler = settings.read(channel)['sampler']
-        if style is None:
-            style = settings.read(channel)['style']
+        if styles is None:
+            styles = settings.read(channel)['style']
         if facefix is None:
             facefix = settings.read(channel)['facefix']
         if highres_fix is None:
             highres_fix = settings.read(channel)['highres_fix']
         if clip_skip is None:
             clip_skip = settings.read(channel)['clip_skip']
-        if hypernet is None:
-            hypernet = settings.read(channel)['hypernet']
-        if lora is None:
-            lora = settings.read(channel)['lora']
         if strength is None:
             strength = settings.read(channel)['strength']
-        if count is None:
-            count = settings.read(channel)['count']
+        if batch is None:
+            batch = settings.read(channel)['batch']
 
         # if a model is not selected, do nothing
         model_name = 'Default'
@@ -211,6 +204,20 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
             data_model = settings.read(channel)['data_model']
 
         simple_prompt = prompt
+        # run through mod function if any moderation values are set in config
+        clean_negative = negative_prompt
+        if settings.global_var.prompt_ban_list or settings.global_var.prompt_ignore_list or settings.global_var.negative_prompt_prefix:
+            mod_results = settings.prompt_mod(simple_prompt, negative_prompt)
+            if mod_results[0] == "Stop":
+                await ctx.respond(f"I'm not allowed to draw the word {mod_results[1]}!", ephemeral=True)
+                return
+            if mod_results[0] == "Mod":
+                if settings.global_var.display_ignored_words == "False":
+                    simple_prompt = mod_results[1]
+                prompt = mod_results[1]
+                negative_prompt = mod_results[2]
+                clean_negative = mod_results[3]
+
         # take selected data_model and get model_name, then update data_model with the full name
         for model in settings.global_var.model_info.items():
             if model[0] == data_model:
@@ -221,11 +228,10 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
                     prompt = model[1][3] + " " + prompt
                 break
 
-        # if a hypernet or lora is used, append it to the prompt
-        if hypernet != 'None':
-            prompt += f' <hypernet:{hypernet}:1>'
-        if lora != 'None':
-            prompt += f' <lora:{lora}:1>'
+        net_multi = 0.85
+        if extra_net is not None:
+            prompt, extra_net, net_multi = settings.extra_net_check(prompt, extra_net, net_multi)
+        prompt = settings.extra_net_defaults(prompt, channel)
 
         if data_model != '':
             print(f'Request -- {ctx.author.name}#{ctx.author.discriminator} -- Prompt: {prompt}')
@@ -242,76 +248,107 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
             except(Exception,):
                 await ctx.send_response('URL image not found!\nI will do my best without it!')
 
-        # formatting aiya initial reply
+        # verify values and format aiya initial reply
         reply_adds = ''
+        if (width != 512) or (height != 512):
+            reply_adds += f' - Size: ``{width}``x``{height}``'
+        reply_adds += f' - Seed: ``{seed}``'
+
         # lower step value to the highest setting if user goes over max steps
         if steps > settings.read(channel)['max_steps']:
             steps = settings.read(channel)['max_steps']
             reply_adds += f'\nExceeded maximum of ``{steps}`` steps! This is the best I can do...'
         if model_name != 'Default':
             reply_adds += f'\nModel: ``{model_name}``'
-        if negative_prompt != '':
-            reply_adds += f'\nNegative Prompt: ``{negative_prompt}``'
-        if (width != 512) or (height != 512):
-            reply_adds += f'\nSize: ``{width}``x``{height}``'
-        if guidance_scale != '7.0':
+        if clean_negative != settings.read(channel)['negative_prompt']:
+            reply_adds += f'\nNegative Prompt: ``{clean_negative}``'
+        if guidance_scale != settings.read(channel)['guidance_scale']:
+            # try to convert string to Web UI-friendly float
             try:
+                guidance_scale = guidance_scale.replace(",", ".")
                 float(guidance_scale)
                 reply_adds += f'\nGuidance Scale: ``{guidance_scale}``'
             except(Exception,):
                 reply_adds += f"\nGuidance Scale can't be ``{guidance_scale}``! Setting to default of `7.0`."
                 guidance_scale = 7.0
-        if sampler != 'Euler a':
+        if sampler != settings.read(channel)['sampler']:
             reply_adds += f'\nSampler: ``{sampler}``'
         if init_image:
-            reply_adds += f'\nStrength: ``{strength}``'
+            # try to convert string to Web UI-friendly float
+            try:
+                strength = strength.replace(",", ".")
+                float(strength)
+                reply_adds += f'\nStrength: ``{strength}``'
+            except(Exception,):
+                reply_adds += f"\nStrength can't be ``{strength}``! Setting to default of `0.75`."
+                strength = 0.75
             reply_adds += f'\nURL Init Image: ``{init_image.url}``'
-        if count != 1:
-            max_count = settings.read(channel)['max_count']
-            if count > max_count:
-                count = max_count
-                reply_adds += f'\nExceeded maximum of ``{count}`` images! This is the best I can do...'
-            reply_adds += f'\nCount: ``{count}``'
-        if style != 'None':
-            reply_adds += f'\nStyle: ``{style}``'
-        if hypernet != 'None':
-            reply_adds += f'\nHypernet: ``{hypernet}``'
-        if lora != 'None':
-            reply_adds += f'\nLoRA: ``{lora}``'
-        if facefix != 'None':
+        # try to convert batch to usable format
+        batch_check = settings.batch_format(batch)
+        batch = list(batch_check)
+        if batch[0] != 1 or batch[1] != 1:
+            max_batch = settings.batch_format(settings.read(channel)['max_batch'])
+            # if only one number is provided, try to generate the requested amount, prioritizing batch size
+            if batch[2] == 1:
+                # if over the limits, cut the number in half and let AIYA scale down
+                total = max_batch[0] * max_batch[1]
+                if batch[0] > total:
+                    batch[0] = math.ceil(batch[0] / 2)
+                    batch[1] = math.ceil(batch[0] / 2)
+                else:
+                    # do... math
+                    difference = math.ceil(batch[0] / max_batch[1])
+                    multiple = int(batch[0] / difference)
+                    new_total = difference * multiple
+                    requested = batch[0]
+                    batch[0], batch[1] = difference, multiple
+                    if requested % difference != 0:
+                        reply_adds += f"\nI can't draw exactly ``{requested}`` pictures! Settling for ``{new_total}``."
+            # check batch values against the maximum limits
+            if batch[0] > max_batch[0]:
+                reply_adds += f"\nThe max batch count I'm allowed here is ``{max_batch[0]}``!"
+                batch[0] = max_batch[0]
+            if batch[1] > max_batch[1]:
+                reply_adds += f"\nThe max batch size I'm allowed here is ``{max_batch[1]}``!"
+                batch[1] = max_batch[1]
+            reply_adds += f'\nBatch count: ``{batch[0]}`` - Batch size: ``{batch[1]}``'
+        if styles != settings.read(channel)['style']:
+            reply_adds += f'\nStyle: ``{styles}``'
+        if extra_net is not None and extra_net != 'None':
+            reply_adds += f'\nExtra network: ``{extra_net}``'
+            if net_multi != 0.85:
+                reply_adds += f' (multiplier: ``{net_multi}``)'
+        if facefix != settings.read(channel)['facefix']:
             reply_adds += f'\nFace restoration: ``{facefix}``'
-        if clip_skip != 1:
+        if clip_skip != settings.read(channel)['clip_skip']:
             reply_adds += f'\nCLIP skip: ``{clip_skip}``'
+            
+        epoch_time = int(time.time())
 
         # set up tuple of parameters to pass into the Discord view
         input_tuple = (
             ctx, simple_prompt, prompt, negative_prompt, data_model, steps, width, height, guidance_scale, sampler, seed, strength,
-            init_image, count, style, facefix, highres_fix, clip_skip, hypernet, lora)
+            init_image, batch, styles, facefix, highres_fix, clip_skip, extra_net, epoch_time)
+        
         view = viewhandler.DrawView(input_tuple)
         # setup the queue
+        user_queue_limit = settings.queue_check(ctx.author)
         if queuehandler.GlobalQueue.dream_thread.is_alive():
-            user_already_in_queue = False
-            for queue_object in queuehandler.GlobalQueue.queue:
-                if queue_object.ctx.author.id == ctx.author.id:
-                    user_already_in_queue = True
-                    break
-            if user_already_in_queue:
-                await ctx.send_response(content=f'Please wait! You\'re queued up.', ephemeral=True)
+            if user_queue_limit == "Stop":
+                await ctx.send_response(content=f"Please wait! You're past your queue limit of {settings.global_var.queue_limit}.", ephemeral=True)
             else:
                 queuehandler.GlobalQueue.queue.append(queuehandler.DrawObject(self, *input_tuple, view))
-                await ctx.send_response(
-                    f'<@{ctx.author.id}>, {settings.messages()}\nQueue: ``{len(queuehandler.GlobalQueue.queue)}`` - ``{simple_prompt}``\nSteps: ``{steps}`` - Seed: ``{seed}``{reply_adds}')
         else:
             await queuehandler.process_dream(self, queuehandler.DrawObject(self, *input_tuple, view))
-            await ctx.send_response(
-                f'<@{ctx.author.id}>, {settings.messages()}\nQueue: ``{len(queuehandler.GlobalQueue.queue)}`` - ``{simple_prompt}``\nSteps: ``{steps}`` - Seed: ``{seed}``{reply_adds}')
+        if user_queue_limit != "Stop":
+            await ctx.send_response(f'<@{ctx.author.id}>, {settings.messages()}\nQueue: ``{len(queuehandler.GlobalQueue.queue)}`` - ``{simple_prompt}``\nSteps: ``{steps}``{reply_adds}')
 
     # the function to queue Discord posts
-    def post(self, event_loop: AbstractEventLoop, post_queue_object: queuehandler.PostObject):
+    def post(self, event_loop: queuehandler.GlobalQueue.post_event_loop, post_queue_object: queuehandler.PostObject):
         event_loop.create_task(
             post_queue_object.ctx.channel.send(
                 content=post_queue_object.content,
-                files=post_queue_object.files,
+                file=post_queue_object.file,
                 view=post_queue_object.view
             )
         )
@@ -319,14 +356,9 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
             self.post(self.event_loop, self.queue.pop(0))
 
     # generate the image
-    def dream(self, event_loop: AbstractEventLoop, queue_object: queuehandler.DrawObject):
+    def dream(self, event_loop: queuehandler.GlobalQueue.event_loop, queue_object: queuehandler.DrawObject):
         try:
             start_time = time.time()
-
-            # create persistent session since we'll need to do a few API calls
-            s = requests.Session()
-            if settings.global_var.api_auth:
-                s.auth = (settings.global_var.api_user, settings.global_var.api_pass)
 
             # construct a payload for data model, then the normal payload
             model_payload = {
@@ -341,12 +373,13 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
                 "cfg_scale": queue_object.guidance_scale,
                 "sampler_index": queue_object.sampler,
                 "seed": queue_object.seed,
-                "seed_resize_from_h": 0,
-                "seed_resize_from_w": 0,
+                "seed_resize_from_h": -1,
+                "seed_resize_from_w": -1,
                 "denoising_strength": None,
-                "n_iter": queue_object.batch_count,
+                "n_iter": queue_object.batch[0],
+                "batch_size": queue_object.batch[1],
                 "styles": [
-                    queue_object.style
+                    queue_object.styles
                 ]
             }
 
@@ -388,17 +421,9 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
             }
             payload.update(override_payload)
 
-            # send normal payload to webui
-            if settings.global_var.gradio_auth:
-                login_payload = {
-                    'username': settings.global_var.username,
-                    'password': settings.global_var.password
-                }
-                s.post(settings.global_var.url + '/login', data=login_payload)
-            else:
-                s.post(settings.global_var.url + '/login')
+            # send normal payload to webui and only send model payload if one is defined
+            s = settings.authenticate_user()
 
-            # only send model payload if one is defined
             if queue_object.data_model != '':
                 s.post(url=f'{settings.global_var.url}/sdapi/v1/options', json=model_payload)
             if queue_object.init_image is not None:
@@ -411,53 +436,147 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
             # create safe/sanitized filename
             keep_chars = (' ', '.', '_')
             file_name = "".join(c for c in queue_object.simple_prompt if c.isalnum() or c in keep_chars).rstrip()
+            epoch_time = queue_object.epoch_time
 
             # save local copy of image and prepare PIL images
-            pil_images = []
-            for i, image_base64 in enumerate(response_data['images']):
-                image = Image.open(io.BytesIO(base64.b64decode(image_base64.split(",", 1)[0])))
-                pil_images.append(image)
+            image_data = response_data['images']
+            count = 0
+            image_count = len(image_data)
+            batch = False
+
+            # setup batch params
+            if queue_object.batch[0] > 1 or queue_object.batch[1] > 1:
+                batch = True
+                grids = []
+                images = []
+                aspect_ratio = queue_object.width / queue_object.height
+                num_grids = math.ceil(image_count / 25)
+                grid_count = 25 if num_grids > 1 else image_count
+                last_grid_count = image_count % 25
+                if num_grids > 1 and image_count % 25 == 0:
+                    last_grid_count = 25
+
+                if aspect_ratio <= 1:
+                    grid_cols = int(math.ceil(math.sqrt(grid_count)))
+                    grid_rows = math.ceil(grid_count / grid_cols)
+                    if last_grid_count > 0:
+                        last_grid_cols = int(math.ceil(math.sqrt(last_grid_count)))
+                        last_grid_rows = math.ceil(last_grid_count / last_grid_cols)
+                else:
+                    grid_rows = int(math.ceil(math.sqrt(grid_count)))
+                    grid_cols = math.ceil(grid_count / grid_rows)
+                    if last_grid_count > 0:
+                        last_grid_rows = int(math.ceil(math.sqrt(last_grid_count)))
+                        last_grid_cols = math.ceil(last_grid_count / last_grid_rows)
+
+                for i in range(num_grids):
+                    if i == num_grids:
+                        continue
+                    
+                    if i < num_grids - 1 or last_grid_count == 0:
+                        width = grid_cols * queue_object.width
+                        height = grid_rows * queue_object.height
+                    else: 
+                        width = last_grid_cols * queue_object.width
+                        height = last_grid_rows * queue_object.height
+                    image = Image.new('RGB', (width, height))
+                    grids.append(image)
+
+            for i in image_data:
+                count += 1
+                image = Image.open(io.BytesIO(base64.b64decode(i)))
 
                 # grab png info
                 png_payload = {
-                    "image": "data:image/png;base64," + image_base64
+                    "image": "data:image/png;base64," + i
                 }
                 png_response = s.post(url=f'{settings.global_var.url}/sdapi/v1/png-info', json=png_payload)
 
                 metadata = PngImagePlugin.PngInfo()
-                epoch_time = int(time.time())
                 metadata.add_text("parameters", png_response.json().get("info"))
-                file_path = f'{settings.global_var.dir}/{epoch_time}-{queue_object.seed}-{file_name[0:120]}-{i}.png'
-                image.save(file_path, pnginfo=metadata)
-                print(f'Saved image: {file_path}')
+                str_parameters = png_response.json().get("info")
 
-            # increment number of images generated
-            settings.stats_count(queue_object.batch_count)
+                file_path = f'{settings.global_var.dir}/{epoch_time}-{queue_object.seed}-{count}.png'
 
-            # post to discord
-            def post_dream():
-                with contextlib.ExitStack() as stack:
-                    buffer_handles = [stack.enter_context(io.BytesIO()) for _ in pil_images]
+                # if we are using a batch we need to save the files to disk
+                if settings.global_var.save_outputs == 'True' or batch == True:
+                    image.save(file_path, pnginfo=metadata)
+                    print(f'Saved image: {file_path}')
 
-                    image_count = len(pil_images)
-                    noun_descriptor = "drawing" if image_count == 1 else f'{image_count} drawings'
+                if batch == True:
+                    image_data = (image, file_path, str_parameters)
+                    images.append(image_data)
+                    
+                settings.stats_count(1)
 
-                    for (pil_image, buffer) in zip(pil_images, buffer_handles):
-                        pil_image.save(buffer, 'PNG', pnginfo=metadata)
-                        buffer.seek(0)
-                    draw_time = '{0:.3f}'.format(end_time - start_time)
-                    message = f'my {noun_descriptor} of ``{queue_object.simple_prompt}`` took me ``{draw_time}`` ' \
-                              f'seconds!\n> *{queue_object.ctx.author.name}#{queue_object.ctx.author.discriminator}*'
-                    files = [discord.File(fp=buffer, filename=f'{queue_object.seed}-{i}.png') for (i, buffer) in
-                             enumerate(buffer_handles)]
+                # increment seed for view when using batch
+                if count != len(image_data):
+                    batch_seed = list(queue_object.view.input_tuple)
+                    batch_seed[10] += 1
+                    new_tuple = tuple(batch_seed)
+                    queue_object.view.input_tuple = new_tuple
 
+            # set up discord message
+            content = f'> for {queue_object.ctx.author.name}'
+            noun_descriptor = "drawing" if image_count == 1 else f'{image_count} drawings'
+            draw_time = '{0:.3f}'.format(end_time - start_time)
+            message = f'my {noun_descriptor} of ``{queue_object.simple_prompt}`` took me ``{draw_time}`` seconds!'
+
+            view = queue_object.view
+
+            if batch == True:
+                current_grid = 0
+                grid_index = 0
+                for grid_image in images:
+                    if grid_index >= grid_count:
+                        grid_index = 0
+                        current_grid += 1
+
+                    if current_grid < num_grids - 1 or last_grid_count == 0:
+                        grid_y, grid_x = divmod(grid_index, grid_cols)
+                        grid_x *= queue_object.width
+                        grid_y *= queue_object.height
+                    else:
+                        grid_y, grid_x = divmod(grid_index, last_grid_cols)
+                        grid_x *= queue_object.width
+                        grid_y *= queue_object.height
+
+                    grids[current_grid].paste(grid_image[0], (grid_x, grid_y))
+                    grid_index += 1
+
+                
+                current_grid = 0
+                for grid in grids:
+                    if current_grid < num_grids -1 or last_grid_count == 0:
+                        id_start = current_grid * grid_count + 1
+                        id_end = id_start + grid_count - 1
+                    else:
+                        id_start = current_grid * grid_count + 1
+                        id_end = id_start + last_grid_count - 1
+                    filename=f'{queue_object.seed}-{current_grid}.png'
+                    file = add_metadata_to_image(grid,images[current_grid * 25][2], filename)
+                    if current_grid == 0:
+                        content = f'<@{queue_object.ctx.author.id}>, {message}\n Batch ID: {epoch_time}-{queue_object.seed}\n Image IDs: {id_start}-{id_end}'
+                    else:
+                        content = f'> for {queue_object.ctx.author.name}, use /info or context menu to retrieve.\n Batch ID: {epoch_time}-{queue_object.seed}\n Image IDs: {id_start}-{id_end}'
+                        view = None
+                        
+                    current_grid += 1
+                    # post discord message
                     queuehandler.process_post(
                         self, queuehandler.PostObject(
-                            self, queue_object.ctx, content=f'<@{queue_object.ctx.author.id}>, {message}', file='', files=files, embed='', view=queue_object.view))
-            Thread(target=post_dream, daemon=True).start()
+                            self, queue_object.ctx, content=content, file=file, embed='', view=view))
+            
+            else:
+                content = f'<@{queue_object.ctx.author.id}>, {message}'
+                filename=f'{queue_object.seed}-{count}.png'
+                file = add_metadata_to_image(image,str_parameters, filename)
+                queuehandler.process_post(
+                    self, queuehandler.PostObject(
+                        self, queue_object.ctx, content=content, file=file, embed='', view=view))
 
-        except KeyError:
-            embed = discord.Embed(title='txt2img failed', description=f'An invalid parameter was found!',
+        except KeyError as e:
+            embed = discord.Embed(title='txt2img failed', description=f'An invalid parameter was found!\n{e}',
                                   color=settings.global_var.embed_color)
             event_loop.create_task(queue_object.ctx.channel.send(embed=embed))
         except Exception as e:
@@ -470,3 +589,17 @@ class StableCog(commands.Cog, name='Stable Diffusion', description='Create image
 
 def setup(bot):
     bot.add_cog(StableCog(bot))
+
+def add_metadata_to_image(image, str_parameters, filename):
+    with io.BytesIO() as buffer:
+        # setup metadata
+        metadata = PngImagePlugin.PngInfo()
+        metadata.add_text("parameters", str_parameters)
+        # save image to buffer
+        image.save(buffer, 'PNG', pnginfo=metadata)
+
+        # reset buffer to beginning and return as bytes
+        buffer.seek(0)
+        file = discord.File(fp=buffer, filename=filename)
+
+    return file

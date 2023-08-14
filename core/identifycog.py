@@ -8,6 +8,7 @@ from discord.ext import commands
 from threading import Thread
 from typing import Optional
 
+from core import ctxmenuhandler
 from core import queuehandler
 from core import viewhandler
 from core import settings
@@ -16,6 +17,10 @@ from core import settings
 class IdentifyCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        self.bot.add_view(viewhandler.DeleteView(self))
 
     @commands.slash_command(name='identify', description='Describe an image', guild_only=True)
     @option(
@@ -35,7 +40,7 @@ class IdentifyCog(commands.Cog):
         str,
         description='The way the image will be described.',
         required=False,
-        choices=['Normal', 'Tags']
+        choices=['Normal', 'Tags', 'Image Info']
     )
     async def dream_handler(self, ctx: discord.ApplicationContext, *,
                             init_image: Optional[discord.Attachment] = None,
@@ -60,30 +65,27 @@ class IdentifyCog(commands.Cog):
         # Update layman-friendly "phrasing" choices into what API understands
         if phrasing == 'Normal':
             phrasing = 'clip'
-        else:
+        elif phrasing == 'Tags':
             phrasing = 'deepdanbooru'
+        else:
+            await ctxmenuhandler.parse_image_info(ctx, init_image.url, "slash")
+            return
 
-        view = viewhandler.DeleteView(ctx.author.id)
+        # set up tuple of parameters to pass into the Discord view
+        input_tuple = (ctx, init_image.url, phrasing)
+        view = viewhandler.DeleteView(input_tuple)
         # set up the queue if an image was found
+        user_queue_limit = settings.queue_check(ctx.author)
         if has_image:
             if queuehandler.GlobalQueue.dream_thread.is_alive():
-                user_already_in_queue = False
-                for queue_object in queuehandler.GlobalQueue.queue:
-                    if queue_object.ctx.author.id == ctx.author.id:
-                        user_already_in_queue = True
-                        break
-                if user_already_in_queue:
-                    await ctx.send_response(content=f'Please wait! You\'re queued up.', ephemeral=True)
+                if user_queue_limit == "Stop":
+                    await ctx.send_response(content=f"Please wait! You're past your queue limit of {settings.global_var.queue_limit}.", ephemeral=True)
                 else:
-                    queuehandler.GlobalQueue.queue.append(queuehandler.IdentifyObject(self, ctx, init_image, phrasing, view))
-                    await ctx.send_response(
-                        f"<@{ctx.author.id}>, I'm identifying the image!"
-                        f"\nQueue: ``{len(queuehandler.GlobalQueue.queue)}``", delete_after=45.0)
+                    queuehandler.GlobalQueue.queue.append(queuehandler.IdentifyObject(self, *input_tuple, view))
             else:
-                await queuehandler.process_dream(self, queuehandler.IdentifyObject(self, ctx, init_image, phrasing, view))
-                await ctx.send_response(
-                    f"<@{ctx.author.id}>, I'm identifying the image!"
-                    f"\nQueue: ``{len(queuehandler.GlobalQueue.queue)}``", delete_after=45.0)
+                await queuehandler.process_dream(self, queuehandler.IdentifyObject(self, *input_tuple, view))
+            if user_queue_limit != "Stop":
+                await ctx.send_response(f"<@{ctx.author.id}>, I'm identifying the image!\nQueue: ``{len(queuehandler.GlobalQueue.queue)}``", delete_after=45.0)
 
     # the function to queue Discord posts
     def post(self, event_loop: AbstractEventLoop, post_queue_object: queuehandler.PostObject):
@@ -100,36 +102,27 @@ class IdentifyCog(commands.Cog):
     def dream(self, event_loop: AbstractEventLoop, queue_object: queuehandler.IdentifyObject):
         try:
             # construct a payload
-            image = base64.b64encode(requests.get(queue_object.init_image.url, stream=True).content).decode('utf-8')
+            image = base64.b64encode(requests.get(queue_object.init_image, stream=True).content).decode('utf-8')
             payload = {
                 "image": 'data:image/png;base64,' + image,
                 "model": queue_object.phrasing
             }
-
             # send normal payload to webui
-            with requests.Session() as s:
-                if settings.global_var.api_auth:
-                    s.auth = (settings.global_var.api_user, settings.global_var.api_pass)
+            s = settings.authenticate_user()
 
-                if settings.global_var.gradio_auth:
-                    login_payload = {
-                        'username': settings.global_var.username,
-                        'password': settings.global_var.password
-                    }
-                    s.post(settings.global_var.url + '/login', data=login_payload)
-                else:
-                    s.post(settings.global_var.url + '/login')
-
-                response = s.post(url=f'{settings.global_var.url}/sdapi/v1/interrogate', json=payload)
+            response = s.post(url=f'{settings.global_var.url}/sdapi/v1/interrogate', json=payload)
             response_data = response.json()
 
             # post to discord
             def post_dream():
-                embed = discord.Embed()
-                embed.set_image(url=queue_object.init_image.url)
-                embed.colour = settings.global_var.embed_color
-                embed.add_field(name=f'I think this is', value=f'``{response_data.get("caption")}``', inline=False)
+                caption = response_data.get('caption')
+                embed_title = 'I think this is'
+                if len(caption) > 4096:
+                    caption = caption[:4096]
 
+                embed = discord.Embed(title=f'{embed_title}', description=f'``{caption}``')
+                embed.set_image(url=queue_object.init_image)
+                embed.colour = settings.global_var.embed_color
                 footer_args = dict(text=f'{queue_object.ctx.author.name}#{queue_object.ctx.author.discriminator}')
                 if queue_object.ctx.author.avatar is not None:
                     footer_args['icon_url'] = queue_object.ctx.author.avatar.url
@@ -137,7 +130,7 @@ class IdentifyCog(commands.Cog):
 
                 queuehandler.process_post(
                     self, queuehandler.PostObject(
-                        self, queue_object.ctx, content=f'<@{queue_object.ctx.author.id}>', file='', files='', embed=embed, view=queue_object.view))
+                        self, queue_object.ctx, content=f'<@{queue_object.ctx.author.id}>', file='', embed=embed, view=queue_object.view))
             Thread(target=post_dream, daemon=True).start()
 
         except Exception as e:
